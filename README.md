@@ -20,7 +20,7 @@ It is built into Rosalina, so it works in **any game**, including retail games, 
 
 Flashback is a complete Luma3DS build, so it needs [boot9strap](https://github.com/SciresM/boot9strap) like regular Luma3DS. Download `boot.firm` from this fork's releases, then choose one of these:
 
-* **Try it alongside your current Luma3DS (recommended):** copy `boot.firm` to `/luma/payloads/y_flashback.firm` on your SD card. Hold <kbd>Y</kbd> while powering on to boot Flashback; power on normally to boot your usual Luma3DS. Let go of <kbd>Y</kbd> once the screen changes.
+* **Try it alongside your current Luma3DS (recommended):** rename and copy `boot.firm` to `/luma/payloads/y_flashback.firm` on your SD card. Hold <kbd>Y</kbd> while powering on to boot Flashback; power on normally to boot your usual Luma3DS. Let go of <kbd>Y</kbd> once the screen changes.
 * **Use it as your main Luma3DS:** replace `boot.firm` in the root of your SD card. Keep a copy of your old `boot.firm` in case you want to go back.
 
 To check that you're running Flashback, open the Rosalina menu (<kbd>L+Down+Select</kbd>): the bottom line reads **"Luma3DS v13.4 (Flashback)"** and the menu has a **Flashback recorder** entry.
@@ -89,7 +89,6 @@ A good-quality SD card handles this easily, but continuous writing does add wear
 
 * **Recording is always off after a reboot**: turn it on from the Flashback screen each time. Your other settings (resolution, frame rate, format and hotkey) are remembered in `/luma/flashback/settings.bin` when you leave the Flashback screen. Delete that file to go back to the defaults: full resolution and 30 fps on New 3DS/2DS (half resolution and 20 fps on Old 3DS/2DS), raw format, hotkey <kbd>L+R+Down</kbd>.
 * **Only the top screen** is recorded, and only the left eye when 3D is on. There is no audio.
-* **Recording pauses** while a clip is being saved, while a Rosalina menu is open, and while the console is asleep.
 * **SD card only**: Flashback is disabled when Luma3DS boots from the internal memory (NAND).
 * **Old 3DS/2DS are slower**: they have a much slower CPU, so higher settings can make games run slower. That's why they default to half resolution and 20 fps. If a game slows down, lower the resolution or frame rate.
 
