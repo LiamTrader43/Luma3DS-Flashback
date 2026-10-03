@@ -87,11 +87,11 @@ A good-quality SD card handles this easily, but continuous writing does add wear
 
 ### Limitations
 
-* **Settings reset at every boot**: recording starts off, at full resolution, 30 fps, raw format, with the hotkey set to <kbd>L+R+Down</kbd>.
+* **Recording is always off after a reboot**: turn it on from the Flashback screen each time. Your other settings (resolution, frame rate, format and hotkey) are remembered in `/luma/flashback/settings.bin` when you leave the Flashback screen. Delete that file to go back to the defaults: full resolution and 30 fps on New 3DS/2DS (half resolution and 20 fps on Old 3DS/2DS), raw format, hotkey <kbd>L+R+Down</kbd>.
 * **Only the top screen** is recorded, and only the left eye when 3D is on. There is no audio.
 * **Recording pauses** while a clip is being saved, while a Rosalina menu is open, and while the console is asleep.
 * **SD card only**: Flashback is disabled when Luma3DS boots from the internal memory (NAND).
-* **Tested on New 3DS XL.** Old 3DS/2DS models have less system memory and are untested.
+* **Old 3DS/2DS are slower**: they have a much slower CPU, so higher settings can make games run slower. That's why they default to half resolution and 20 fps. If a game slows down, lower the resolution or frame rate.
 
 ## Description
 **Luma3DS** patches and reimplements significant parts of the system software running on all models of the Nintendo 3DS family of consoles. It aims to greatly improve the user experience and support the 3DS far beyond its end-of-life. Features include:

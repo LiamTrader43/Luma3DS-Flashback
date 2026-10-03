@@ -84,7 +84,8 @@ static u8 CTR_ALIGN(8) flashbackThreadStack[0x2000];
 static bool g_threadRunning;
 
 static volatile bool g_enabled;         // user toggle
-// Defaults at boot: full resolution, 30 fps, raw format.
+// Defaults when no settings are saved: full resolution, 30 fps, raw format on
+// New 3DS; half resolution, 20 fps on Old 3DS (see flashbackApplyDefaults).
 static volatile u32  g_wantRes = FLASHBACK_RES_FULL;   // FlashbackResolution chosen in the menu
 static volatile u32  g_wantFpsIdx = 2;                 // index into g_fpsChoices chosen in the menu (30 fps)
 static volatile u32  g_saveFormat = FLASHBACK_FORMAT_RAW; // FlashbackFormat; takes effect on the next save
@@ -815,6 +816,106 @@ static s32 flashbackSave(void)
 }
 
 // ---------------------------------------------------------------------------
+// Settings file
+// ---------------------------------------------------------------------------
+
+#define FLASHBACK_SETTINGS_FILE     FLASHBACK_DIR "/settings.bin"
+#define FLASHBACK_SETTINGS_MAGIC    0x54534246  // "FBST"
+#define FLASHBACK_SETTINGS_VERSION  1
+
+typedef struct FlashbackSettings {
+    u32 magic;
+    u16 version;
+    u16 size;           // sizeof(FlashbackSettings), so newer versions can append fields
+    u8  enabled;        // unused (always 0): recording is always off at boot
+    u8  res;            // FlashbackResolution
+    u8  fpsIdx;         // index into g_fpsChoices
+    u8  format;         // FlashbackFormat
+    u32 saveCombo;
+} FlashbackSettings;
+
+static const char *flashbackCheckCombo(u32 combo);
+
+static FlashbackSettings flashbackCurrentSettings(void)
+{
+    FlashbackSettings s;
+    memset(&s, 0, sizeof(s));
+    s.magic = FLASHBACK_SETTINGS_MAGIC;
+    s.version = FLASHBACK_SETTINGS_VERSION;
+    s.size = sizeof(s);
+    s.enabled = 0;      // not remembered, so toggling recording doesn't rewrite the file
+    s.res = (u8)g_wantRes;
+    s.fpsIdx = (u8)g_wantFpsIdx;
+    s.format = (u8)g_saveFormat;
+    s.saveCombo = g_saveCombo;
+    return s;
+}
+
+// Old 3DS has a third of the CPU speed, and the system core Flashback runs on
+// also serves the game's graphics, input and file requests there, so it gets
+// lighter defaults. Saved settings still override these.
+static void flashbackApplyDefaults(void)
+{
+    if (!isN3DS)
+    {
+        g_wantRes = FLASHBACK_RES_HALF;
+        g_wantFpsIdx = 1;   // 20 fps
+    }
+}
+
+// Loads saved settings, keeping the defaults for anything missing or invalid.
+static void flashbackLoadSettings(void)
+{
+    FlashbackSettings s;
+    IFile file = {0};
+    u64 total = 0;
+
+    if (R_FAILED(IFile_Open(&file, ARCHIVE_SDMC, fsMakePath(PATH_EMPTY, ""),
+                            fsMakePath(PATH_ASCII, FLASHBACK_SETTINGS_FILE), FS_OPEN_READ)))
+        return;
+
+    memset(&s, 0, sizeof(s));
+    Result res = IFile_Read(&file, &total, &s, sizeof(s));
+    IFile_Close(&file);
+
+    if (R_FAILED(res) || total < sizeof(s) || s.magic != FLASHBACK_SETTINGS_MAGIC || s.version != FLASHBACK_SETTINGS_VERSION)
+        return;
+
+    if (s.res < FLASHBACK_RES_COUNT)
+        g_wantRes = s.res;
+    if (s.fpsIdx < FLASHBACK_FPS_CHOICES)
+        g_wantFpsIdx = s.fpsIdx;
+    if (s.format < FLASHBACK_FORMAT_COUNT)
+        g_saveFormat = s.format;
+    // Re-checked in case the Rosalina menu combo was changed since.
+    if (flashbackCheckCombo(s.saveCombo) == NULL)
+        g_saveCombo = s.saveCombo;
+    // Recording itself always starts off at boot, whatever was saved.
+}
+
+static void flashbackSaveSettings(void)
+{
+    FlashbackSettings s = flashbackCurrentSettings();
+    FS_Archive archive;
+    IFile file = {0};
+    u64 total;
+
+    if (!flashbackIsSdMode() || R_FAILED(FSUSER_OpenArchive(&archive, ARCHIVE_SDMC, fsMakePath(PATH_EMPTY, ""))))
+        return;
+
+    if (R_SUCCEEDED(flashbackCreateDirectory(archive, FLASHBACK_DIR)) &&
+        R_SUCCEEDED(IFile_OpenFromArchive(&file, archive, fsMakePath(PATH_ASCII, FLASHBACK_SETTINGS_FILE),
+                                          FS_OPEN_CREATE | FS_OPEN_WRITE)))
+    {
+        IFile_SetSize(&file, sizeof(s));
+        IFile_Write(&file, &total, &s, sizeof(s), 0);
+        IFile_Close(&file);
+    }
+
+    FSUSER_CloseArchive(archive);
+}
+
+// ---------------------------------------------------------------------------
 // Thread, hotkey, menu
 // ---------------------------------------------------------------------------
 
@@ -825,11 +926,14 @@ static void flashbackSetBottomFill(u32 color)
 
 static void flashbackThreadMain(void)
 {
+    bool sdMode = flashbackIsSdMode();
+    flashbackApplyDefaults();
+    if (sdMode)
+        flashbackLoadSettings();
     flashbackApplyFormat(g_wantRes, g_wantFpsIdx);
 
     u64 period = SYSCLOCK_ARM11 / g_fps;
     u64 nextTick = svcGetSystemTick();
-    bool sdMode = flashbackIsSdMode();
     bool wasRecording = false;
 
     while (!preTerminationRequested)
@@ -997,6 +1101,7 @@ void FlashbackMenu_Show(void)
 {
     bool sdMode = flashbackIsSdMode();
     char comboStr[128];
+    FlashbackSettings before = flashbackCurrentSettings();
 
     do
     {
@@ -1078,4 +1183,9 @@ void FlashbackMenu_Show(void)
             break;
     }
     while (!menuShouldExit);
+
+    // Remember the settings for the next boot (only if something changed).
+    FlashbackSettings after = flashbackCurrentSettings();
+    if (memcmp(&before, &after, sizeof(before)) != 0)
+        flashbackSaveSettings();
 }
