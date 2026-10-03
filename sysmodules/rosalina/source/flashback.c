@@ -84,9 +84,10 @@ static u8 CTR_ALIGN(8) flashbackThreadStack[0x2000];
 static bool g_threadRunning;
 
 static volatile bool g_enabled;         // user toggle
-static volatile u32  g_wantRes;         // FlashbackResolution chosen in the menu
-static volatile u32  g_wantFpsIdx;      // index into g_fpsChoices chosen in the menu
-static volatile u32  g_saveFormat;      // FlashbackFormat; takes effect on the next save
+// Defaults at boot: full resolution, 30 fps, raw format.
+static volatile u32  g_wantRes = FLASHBACK_RES_FULL;   // FlashbackResolution chosen in the menu
+static volatile u32  g_wantFpsIdx = 2;                 // index into g_fpsChoices chosen in the menu (30 fps)
+static volatile u32  g_saveFormat = FLASHBACK_FORMAT_RAW; // FlashbackFormat; takes effect on the next save
 static volatile u32  g_saveCombo = FLASHBACK_DEFAULT_SAVE_COMBO;
 
 // Buttons allowed in the save hotkey: face buttons, D-Pad, L/R, ZL/ZR,
@@ -101,8 +102,8 @@ static char g_lastClip[96];
 
 // Recording format currently in effect. Written only by the flashback thread
 // (when nothing is recording); read by the menu for display.
-static volatile u32 g_res = FLASHBACK_RES_HALF;
-static volatile u32 g_fpsIdx = 0;
+static volatile u32 g_res = FLASHBACK_RES_FULL;
+static volatile u32 g_fpsIdx = 2;
 static u32 g_w, g_h, g_fps, g_frames;   // derived from g_res / g_fpsIdx
 static u32 g_slotBytes, g_bmpBytes, g_bmpOffset, g_memSize;
 
