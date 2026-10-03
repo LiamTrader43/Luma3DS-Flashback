@@ -52,10 +52,12 @@
 // priority; the ring file's constant writes must not get ahead of the game.
 #define FLASHBACK_RING_FS_PRIORITY  8
 
-// Bottom screen fill colors (0x00BBGGRR) used as feedback for the hotkey.
-#define FLASHBACK_FILL_SAVING   0x00808000
-#define FLASHBACK_FILL_OK       0x0000C000
-#define FLASHBACK_FILL_FAILED   0x000000E0
+// Semi-transparent bottom screen tints used as feedback for the hotkey
+// (0x00BBGGRR), blended over the screen through the display's color lookup table.
+#define FLASHBACK_TINT_SAVING   0x00FFFFFF  // white
+#define FLASHBACK_TINT_OK       0x0000C000  // green
+#define FLASHBACK_TINT_FAILED   0x000000E0  // red
+#define FLASHBACK_TINT_ALPHA    128         // tint strength, out of 256 (50%)
 
 #define KERNPA2VA_OFFSET()      (GET_VERSION_MINOR(osGetKernelVersion()) < 44 ? 0xD0000000 : 0xC0000000)
 
@@ -919,9 +921,95 @@ static void flashbackSaveSettings(void)
 // Thread, hotkey, menu
 // ---------------------------------------------------------------------------
 
-static void flashbackSetBottomFill(u32 color)
+// Hotkey feedback: a semi-transparent tint over the bottom screen. The
+// display's color lookup table maps every output level; writing a copy blended
+// toward the tint color tints the whole screen while the game stays visible.
+// The table in effect before (screen filter or the system's calibration) is
+// read back first and restored afterwards.
+
+typedef union FlashbackLutEntry {
+    struct { u8 r, g, b, z; };
+    u32 raw;
+} FlashbackLutEntry;
+
+static u32  g_savedLut[256];
+static bool g_lutTinted;
+
+// Like ScreenFiltersMenu_RestoreSettings: GSP must be paused while the table
+// changes, or colors can end up glitched. Under a Rosalina menu it already is
+// (menuEnter pauses it), so only pause it ourselves otherwise. Holding the draw
+// lock keeps menuEnter/menuLeave from changing that state meanwhile.
+static bool flashbackPauseGspForLut(void)
 {
-    LCD_BOT_FILLCOLOR = color == 0 ? 0 : (LCD_FILLCOLOR_ENABLE | color);
+    if (menuIsOpen())
+        return false;
+    svcKernelSetState(0x10000, 2);
+    svcSleepThread(5 * 1000 * 100LL);
+    return true;
+}
+
+static void flashbackResumeGspForLut(bool paused)
+{
+    if (!paused)
+        return;
+    svcKernelSetState(0x10000, 2);
+    svcSleepThread(5 * 1000 * 100LL);
+}
+
+static void flashbackWriteTintedLut(u32 color)
+{
+    FlashbackLutEntry tint = { .raw = color };
+    GPU_FB_BOTTOM_COL_LUT_INDEX = 0;
+    for (u32 i = 0; i < 256; i++)
+    {
+        FlashbackLutEntry px = { .raw = g_savedLut[i] };
+        px.r += ((s32)tint.r - px.r) * FLASHBACK_TINT_ALPHA / 256;
+        px.g += ((s32)tint.g - px.g) * FLASHBACK_TINT_ALPHA / 256;
+        px.b += ((s32)tint.b - px.b) * FLASHBACK_TINT_ALPHA / 256;
+        GPU_FB_BOTTOM_COL_LUT_ELEM = px.raw;
+    }
+}
+
+static void flashbackSetTint(u32 color)
+{
+    Draw_Lock();
+    bool paused = flashbackPauseGspForLut();
+
+    if (!g_lutTinted)
+    {
+        GPU_FB_BOTTOM_COL_LUT_INDEX = 0;
+        for (u32 i = 0; i < 256; i++)
+            g_savedLut[i] = GPU_FB_BOTTOM_COL_LUT_ELEM;
+
+        // A real table gets brighter from entry 0 to 255. If reading it back
+        // gave nothing usable, restore to a neutral table instead.
+        FlashbackLutEntry lo = { .raw = g_savedLut[0] }, hi = { .raw = g_savedLut[255] };
+        if (hi.r + hi.g + hi.b <= lo.r + lo.g + lo.b + 96)
+            for (u32 i = 0; i < 256; i++)
+                g_savedLut[i] = i | (i << 8) | (i << 16);
+
+        g_lutTinted = true;
+    }
+
+    flashbackWriteTintedLut(color);
+
+    flashbackResumeGspForLut(paused);
+    Draw_Unlock();
+}
+
+static void flashbackClearTint(void)
+{
+    Draw_Lock();
+    if (g_lutTinted)
+    {
+        bool paused = flashbackPauseGspForLut();
+        GPU_FB_BOTTOM_COL_LUT_INDEX = 0;
+        for (u32 i = 0; i < 256; i++)
+            GPU_FB_BOTTOM_COL_LUT_ELEM = g_savedLut[i];
+        g_lutTinted = false;
+        flashbackResumeGspForLut(paused);
+    }
+    Draw_Unlock();
 }
 
 static void flashbackThreadMain(void)
@@ -941,11 +1029,10 @@ static void flashbackThreadMain(void)
         if (g_saveRequested)
         {
             bool feedback = g_saveFromHotkey;
-            u32 savedFill = LCD_BOT_FILLCOLOR;
 
             g_saving = true;
             if (feedback)
-                flashbackSetBottomFill(FLASHBACK_FILL_SAVING);
+                flashbackSetTint(FLASHBACK_TINT_SAVING);
 
             u64 t0 = svcGetSystemTick();
             s32 res = flashbackSave();
@@ -954,10 +1041,15 @@ static void flashbackThreadMain(void)
 
             if (feedback)
             {
+                // Skip the result flash if a menu was opened mid-save: the
+                // tint would color the menu instead of the game.
                 bool complete = res > 0 && (u32)res == g_lastSaveExpected;
-                flashbackSetBottomFill(complete ? FLASHBACK_FILL_OK : FLASHBACK_FILL_FAILED);
-                svcSleepThread(300 * 1000 * 1000LL);
-                LCD_BOT_FILLCOLOR = savedFill;
+                if (!menuIsOpen())
+                {
+                    flashbackSetTint(complete ? FLASHBACK_TINT_OK : FLASHBACK_TINT_FAILED);
+                    svcSleepThread(300 * 1000 * 1000LL);
+                }
+                flashbackClearTint();
             }
 
             g_saveFromHotkey = false;

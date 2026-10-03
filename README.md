@@ -30,7 +30,7 @@ To check that you're running Flashback, open the Rosalina menu (<kbd>L+Down+Sele
 1. Open the Rosalina menu with <kbd>L+Down+Select</kbd> and choose **Flashback recorder**.
 2. Press <kbd>A</kbd> to turn **Recording** on, then press <kbd>B</kbd> twice to return to your game.
 3. Play. Flashback always keeps the most recent 10 seconds.
-4. When you want to keep a moment, press <kbd>L+R+Down</kbd>. The bottom screen turns teal while saving, then flashes **green** when the clip is saved (or **red** if something went wrong).
+4. When you want to keep a moment, press <kbd>L+R+Down</kbd>. The bottom screen gets a see-through **white** tint while saving, then briefly turns **green** when the clip is saved (or **red** if something went wrong). You can keep seeing and using the bottom screen the whole time.
 
 You can also save from the Flashback screen with <kbd>X</kbd>. Recording pauses while any Rosalina menu is open (the game is paused too), so saving from the menu doesn't add frozen frames to the end of your clip.
 
