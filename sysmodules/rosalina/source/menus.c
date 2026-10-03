@@ -41,6 +41,7 @@
 #include "fmt.h"
 #include "process_patches.h"
 #include "luma_config.h"
+#include "flashback.h"
 
 Menu rosalinaMenu = {
     "Rosalina menu",
@@ -48,7 +49,8 @@ Menu rosalinaMenu = {
         { "Take screenshot", METHOD, .method = &RosalinaMenu_TakeScreenshot },
         { "Screen filters...", MENU, .menu = &screenFiltersMenu },
         { "Cheats...", METHOD, .method = &RosalinaMenu_Cheats },
-        { "", METHOD, .method = PluginLoader__MenuCallback},
+        { "", METHOD, .method = PluginLoader__MenuCallback}, // must stay items[3], see PluginLoader__UpdateMenu
+        { "Flashback recorder", METHOD, .method = &FlashbackMenu_Show },
         { "New 3DS menu...", MENU, .menu = &N3DSMenu, .visibility = &menuCheckN3ds },
         { "Process list", METHOD, .method = &RosalinaMenu_ProcessList },
         { "Debugger options...", MENU, .menu = &debuggerMenu },

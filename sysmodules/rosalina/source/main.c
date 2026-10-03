@@ -32,6 +32,7 @@
 #include "utils.h"
 #include "sleep.h"
 #include "MyThread.h"
+#include "flashback.h"
 #include "menus/miscellaneous.h"
 #include "menus/debugger.h"
 #include "menus/screen_filters.h"
@@ -269,6 +270,7 @@ int main(void)
     MyThread *menuThread = menuCreateThread();
     MyThread *taskRunnerThread = taskRunnerCreateThread();
     MyThread *errDispThread = errDispCreateThread();
+    MyThread *flashbackThread = flashbackCreateThread();
     bootdiagCreateThread();
 
     if (R_FAILED(ServiceManager_Run(services, notifications, NULL)))
@@ -280,6 +282,8 @@ int main(void)
 
     MyThread_Join(taskRunnerThread, -1LL);
     MyThread_Join(errDispThread, -1LL);
+    if (flashbackThread != NULL)
+        MyThread_Join(flashbackThread, -1LL);
 
     return 0;
 }

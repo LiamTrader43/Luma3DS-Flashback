@@ -39,6 +39,7 @@
 #include "plugin.h"
 #include "menus/screen_filters.h"
 #include "shell.h"
+#include "flashback.h"
 
 //#define ROSALINA_MENU_SELF_SCREENSHOT 1 // uncomment this to enable the feature
 
@@ -379,6 +380,8 @@ void menuThreadMain(void)
 
         u32 kHeld = scanHeldKeys();
 
+        Flashback_HandleKeys(kHeld);
+
         if(((kHeld & menuCombo) == menuCombo) && !g_blockMenuOpen)
         {
             menuEnter();
@@ -430,6 +433,13 @@ void menuLeave(void)
         svcKernelSetState(0x10000, 2 | 1);
     }
     Draw_Unlock();
+}
+
+bool menuIsOpen(void)
+{
+    // Set between menuEnter and menuLeave: the Rosalina menu, error screens
+    // and plugin messages, during which the running app is paused.
+    return *(volatile s32 *)&menuRefCount > 0;
 }
 
 void menuRequestClose(void)
@@ -504,10 +514,12 @@ static void menuDraw(Menu *menu, u32 selected)
     else
         Draw_DrawFormattedString(SCREEN_BOT_WIDTH - 10 - SPACING_X * 19, SCREEN_BOT_HEIGHT - 20, COLOR_WHITE, "%19s", "");
 
-    if(isRelease)
-        Draw_DrawFormattedString(10, SCREEN_BOT_HEIGHT - 20, COLOR_TITLE, "Luma3DS %s", versionString);
-    else
-        Draw_DrawFormattedString(10, SCREEN_BOT_HEIGHT - 20, COLOR_TITLE, "Luma3DS %s-%08lx", versionString, commitHash);
+    // Modified build (Flashback recorder), marked as such per the license terms.
+    // The commit hash is left out on dev builds: with the suffix it would run
+    // into the battery info on the right.
+    (void)isRelease;
+    (void)commitHash;
+    Draw_DrawFormattedString(10, SCREEN_BOT_HEIGHT - 20, COLOR_TITLE, "Luma3DS %s (Flashback)", versionString);
 
     Draw_FlushFramebuffer();
 }

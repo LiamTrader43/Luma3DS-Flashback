@@ -94,6 +94,7 @@ u32 menuCountItems(const Menu *menu);
 MyThread *menuCreateThread(void);
 void    menuEnter(void);
 void    menuLeave(void);
+bool    menuIsOpen(void);
 void    menuRequestClose(void);
 void    menuThreadMain(void);
 void    menuShow(Menu *root);
