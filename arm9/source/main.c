@@ -293,13 +293,25 @@ void main(int argc, char **argv, u32 magicWord)
 
     bool autoBootEmu = CONFIG(AUTOBOOTEMU);
 
-    if((pressed & (BUTTON_START | BUTTON_L1)) == BUTTON_START)
+    // Flashback: when this build was itself chainloaded as a payload (e.g.
+    // /luma/payloads/y_flashback.firm), the button that selected it is usually
+    // still held, which would chainload the same payload again and again until
+    // it's released. Payloads therefore don't chainload further payloads.
+    static const char sdPayloadsDir[] = "sdmc:/luma/payloads/";
+    static const char nandPayloadsDir[] = "nand:/rw/luma/payloads/";
+    bool isPayloadBoot = memcmp(launchedPathForFatfs, sdPayloadsDir, sizeof(sdPayloadsDir) - 1) == 0 ||
+                         memcmp(launchedPathForFatfs, nandPayloadsDir, sizeof(nandPayloadsDir) - 1) == 0;
+
+    if(!isPayloadBoot)
     {
-        loadHomebrewFirm(0);
-        pressed = HID_PAD;
+        if((pressed & (BUTTON_START | BUTTON_L1)) == BUTTON_START)
+        {
+            loadHomebrewFirm(0);
+            pressed = HID_PAD;
+        }
+        else if((((pressed & SINGLE_PAYLOAD_BUTTONS) || (!autoBootEmu && (pressed & DPAD_BUTTONS))) && !(pressed & (BUTTON_L1 | BUTTON_R1))) ||
+                (((pressed & L_PAYLOAD_BUTTONS) || (autoBootEmu && (pressed & DPAD_BUTTONS))) && (pressed & BUTTON_L1))) loadHomebrewFirm(pressed);
     }
-    else if((((pressed & SINGLE_PAYLOAD_BUTTONS) || (!autoBootEmu && (pressed & DPAD_BUTTONS))) && !(pressed & (BUTTON_L1 | BUTTON_R1))) ||
-            (((pressed & L_PAYLOAD_BUTTONS) || (autoBootEmu && (pressed & DPAD_BUTTONS))) && (pressed & BUTTON_L1))) loadHomebrewFirm(pressed);
 
     if(splashMode == 2 && loadSplash()) pressed = HID_PAD;
 
