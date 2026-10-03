@@ -8,6 +8,91 @@
 ![Boot menu screenshot](img/boot_menu_v1321.png)
 ![Rosalina menu screenshot](img/rosalina_menu_v1321.png)
 
+> **This is an unofficial fork.** It is not made or supported by the Luma3DS team. Please report Flashback issues here, not to the official Luma3DS repository.
+
+## Flashback recorder
+
+Flashback is a "replay buffer" for the 3DS top screen. While recording is on, it keeps the **last 10 seconds** of gameplay. When something worth keeping happens, press a button combo and those 10 seconds are saved to the SD card as a video file.
+
+It is built into Rosalina, so it works in **any game**, including retail games, without plugins. It uses none of the game's memory and has no noticeable effect on game performance.
+
+### Installing
+
+Flashback is a complete Luma3DS build, so it needs [boot9strap](https://github.com/SciresM/boot9strap) like regular Luma3DS. Download `boot.firm` from this fork's releases, then choose one of these:
+
+* **Try it alongside your current Luma3DS (recommended):** copy `boot.firm` to `/luma/payloads/y_flashback.firm` on your SD card. Hold <kbd>Y</kbd> while powering on to boot Flashback; power on normally to boot your usual Luma3DS. Let go of <kbd>Y</kbd> once the screen changes.
+* **Use it as your main Luma3DS:** replace `boot.firm` in the root of your SD card. Keep a copy of your old `boot.firm` in case you want to go back.
+
+To check that you're running Flashback, open the Rosalina menu (<kbd>L+Down+Select</kbd>): the bottom line reads **"Luma3DS v13.4 (Flashback)"** and the menu has a **Flashback recorder** entry.
+
+### Recording and saving a clip
+
+1. Open the Rosalina menu with <kbd>L+Down+Select</kbd> and choose **Flashback recorder**.
+2. Press <kbd>A</kbd> to turn **Recording** on, then press <kbd>B</kbd> twice to return to your game.
+3. Play. Flashback always keeps the most recent 10 seconds.
+4. When you want to keep a moment, press <kbd>L+R+Down</kbd>. The bottom screen turns teal while saving, then flashes **green** when the clip is saved (or **red** if something went wrong).
+
+You can also save from the Flashback screen with <kbd>X</kbd>. Recording pauses while any Rosalina menu is open (the game is paused too), so saving from the menu doesn't add frozen frames to the end of your clip.
+
+### Flashback screen controls
+
+| Button | Action |
+|---|---|
+| <kbd>A</kbd> | Turn recording on/off |
+| <kbd>X</kbd> | Save a clip now |
+| <kbd>Y</kbd> | Resolution: half (200x120) or full (400x240) |
+| <kbd>Left</kbd>/<kbd>Right</kbd> | Frame rate: 10, 20 or 30 fps |
+| <kbd>Up</kbd>/<kbd>Down</kbd> | Save format: raw video or BMP frames |
+| <kbd>Select</kbd> | Change the save hotkey |
+| <kbd>B</kbd> | Back |
+
+Changing the resolution or frame rate clears the 10-second buffer. Changing the save format doesn't.
+
+The screen also shows live stats. **Rate** should stay close to the frame rate you picked. If **duplicated** keeps climbing, your SD card can't keep up with the current settings: missed frames are filled with copies of the previous frame so clips still play at the right speed, but a lower resolution or frame rate will look smoother.
+
+**Changing the save hotkey:** press <kbd>Select</kbd>, hold the new combination (at least 2 buttons), then let go. Combos that overlap the Rosalina menu combo aren't allowed.
+
+### Where clips are saved and how to watch them
+
+Clips are saved in `/luma/flashback/` on the SD card, named after the date and time they were saved.
+
+**Raw video (default, fastest to save).** Each clip is a `clip_<date>.raw` file plus a `clip_<date>.txt` that lists its resolution and frame rate, and contains a ready-to-use command to turn it into an MP4. To convert it:
+
+1. Install [ffmpeg](https://ffmpeg.org/download.html) on your PC and make sure the `ffmpeg` command works in a terminal.
+2. Copy the `.raw` and `.txt` files to your PC.
+3. Open a terminal in that folder and run the command from the `.txt`. It looks like this:
+
+   ```
+   ffmpeg -f rawvideo -pixel_format rgb565le -video_size 400x240 -framerate 30 -i "clip_<date>.raw" -vf "scale=iw*2:ih*2:flags=neighbor" -c:v libx264 -crf 12 -pix_fmt yuv420p "clip_<date>.mp4"
+   ```
+
+The MP4 plays in any video player and imports into video editors like DaVinci Resolve. The command doubles the size with sharp pixels; for a 1080p editing timeline, use `scale=iw*4.5:ih*4.5:flags=neighbor` at full resolution instead.
+
+**BMP frames.** Each clip is a `clip_<date>/` folder of numbered images (`frame_000.bmp`, `frame_001.bmp`, ...) that you can open directly. To turn them into a video, run this in the clip folder, using the frame rate you recorded at:
+
+```
+ffmpeg -framerate 30 -i frame_%03d.bmp -vf "scale=iw*2:ih*2:flags=neighbor" -c:v libx264 -crf 12 -pix_fmt yuv420p clip.mp4
+```
+
+### SD card usage
+
+The buffer lives in `/luma/flashback/ring.bin` on the SD card, and recording writes to it continuously.
+
+| Setting | Buffer file size | Saved clip (raw) | Written while recording |
+|---|---|---|---|
+| Half resolution, 10 fps | 4.8 MB | 4.8 MB | about 1.7 GB per hour |
+| Full resolution, 30 fps | 58 MB | 58 MB | about 21 GB per hour |
+
+A good-quality SD card handles this easily, but continuous writing does add wear, especially at full resolution and 30 fps. Turn recording off when you don't need it.
+
+### Limitations
+
+* **Settings reset at every boot**: recording starts off, at half resolution, 10 fps, raw format, with the hotkey set to <kbd>L+R+Down</kbd>.
+* **Only the top screen** is recorded, and only the left eye when 3D is on. There is no audio.
+* **Recording pauses** while a clip is being saved, while a Rosalina menu is open, and while the console is asleep.
+* **SD card only**: Flashback is disabled when Luma3DS boots from the internal memory (NAND).
+* **Tested on New 3DS XL.** Old 3DS/2DS models have less system memory and are untested.
+
 ## Description
 **Luma3DS** patches and reimplements significant parts of the system software running on all models of the Nintendo 3DS family of consoles. It aims to greatly improve the user experience and support the 3DS far beyond its end-of-life. Features include:
 
