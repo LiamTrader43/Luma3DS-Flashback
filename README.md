@@ -20,7 +20,7 @@ It is built into Rosalina, so it works in **any game**, including retail games, 
 
 Flashback is a complete Luma3DS build, so it needs [boot9strap](https://github.com/SciresM/boot9strap) like regular Luma3DS. Download `boot.firm` from this fork's releases, then choose one of these:
 
-* **Try it alongside your current Luma3DS (recommended):** copy `boot.firm` to `/luma/payloads/y_flashback.firm` on your SD card. Hold <kbd>Y</kbd> while powering on to boot Flashback; power on normally to boot your usual Luma3DS. Let go of <kbd>Y</kbd> once the screen changes.
+* **Try it alongside your current Luma3DS (recommended):** rename and copy `boot.firm` to `/luma/payloads/y_flashback.firm` on your SD card. Hold <kbd>Y</kbd> while powering on to boot Flashback; power on normally to boot your usual Luma3DS. Let go of <kbd>Y</kbd> once the screen changes.
 * **Use it as your main Luma3DS:** replace `boot.firm` in the root of your SD card. Keep a copy of your old `boot.firm` in case you want to go back.
 
 To check that you're running Flashback, open the Rosalina menu (<kbd>L+Down+Select</kbd>): the bottom line reads **"Luma3DS v13.4 (Flashback)"** and the menu has a **Flashback recorder** entry.
