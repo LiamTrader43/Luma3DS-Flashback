@@ -89,7 +89,6 @@ A good-quality SD card handles this easily, but continuous writing does add wear
 
 * **Settings reset at every boot**: recording starts off, at full resolution, 30 fps, raw format, with the hotkey set to <kbd>L+R+Down</kbd>.
 * **Only the top screen** is recorded, and only the left eye when 3D is on. There is no audio.
-* **Recording pauses** while a clip is being saved, while a Rosalina menu is open, and while the console is asleep.
 * **SD card only**: Flashback is disabled when Luma3DS boots from the internal memory (NAND).
 * **Tested on New 3DS XL.** Old 3DS/2DS models have less system memory and are untested.
 
