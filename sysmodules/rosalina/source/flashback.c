@@ -1070,6 +1070,14 @@ static void flashbackThreadMain(void)
             wasRecording = false;
         }
 
+        // Turning recording off clears the buffer (and frees the recorder's
+        // memory); turning it back on starts a fresh one.
+        if (!g_enabled && g_active)
+        {
+            flashbackStop();
+            wasRecording = false;
+        }
+
         if (g_enabled && !g_active && sdMode && R_FAILED(flashbackStart()))
             g_enabled = false;
 
@@ -1244,7 +1252,7 @@ void FlashbackMenu_Show(void)
         posY = Draw_DrawString(10, posY, COLOR_WHITE, "A: recording on/off   X: save clip now\n");
         posY = Draw_DrawString(10, posY, COLOR_WHITE, "Y: resolution   Left/Right: frame rate\n");
         posY = Draw_DrawString(10, posY, COLOR_WHITE, "Up/Down: format   Select: hotkey   B: back\n");
-        posY = Draw_DrawString(10, posY, COLOR_WHITE, "Resolution/frame rate changes clear the buffer.\n\n");
+        posY = Draw_DrawString(10, posY, COLOR_WHITE, "Turning off or changing res/fps clears the buffer.\n\n");
         LumaConfig_ConvertComboToString(comboStr, g_saveCombo);
         Draw_DrawFormattedString(10, posY, COLOR_WHITE, "In game: %s saves a clip.", comboStr);
 

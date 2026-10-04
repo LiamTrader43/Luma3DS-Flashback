@@ -46,7 +46,7 @@ You can also save from the Flashback screen with <kbd>X</kbd>. Recording pauses 
 | <kbd>Select</kbd> | Change the save hotkey |
 | <kbd>B</kbd> | Back |
 
-Changing the resolution or frame rate clears the 10-second buffer. Changing the save format doesn't.
+Turning recording off, or changing the resolution or frame rate, clears the 10-second buffer. Changing the save format doesn't. Opening a menu only pauses recording, so the buffer is kept.
 
 The screen also shows live stats. **Rate** should stay close to the frame rate you picked. If **duplicated** keeps climbing, your SD card can't keep up with the current settings: missed frames are filled with copies of the previous frame so clips still play at the right speed, but a lower resolution or frame rate will look smoother.
 
