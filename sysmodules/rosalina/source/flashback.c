@@ -125,7 +125,6 @@ static u16   g_repeat[FLASHBACK_MAX_FRAMES];
 
 // Performance stats shown in the menu, updated about once a second while recording.
 static volatile u32 g_statFpsX10;       // frames actually recorded per second, x10
-static volatile u32 g_statDropped;      // frames skipped because we fell behind, since recording started
 static volatile u32 g_statCaptureUs;    // average time to read + convert one frame
 static volatile u32 g_statWriteUs;      // average time to write one frame to the SD card
 static volatile u32 g_lastSaveMs;       // duration of the last save
@@ -152,7 +151,7 @@ static void flashbackApplyFormat(u32 res, u32 fpsIdx)
 
 static void flashbackResetStats(void)
 {
-    g_statFpsX10 = g_statDropped = g_statCaptureUs = g_statWriteUs = 0;
+    g_statFpsX10 = g_statCaptureUs = g_statWriteUs = 0;
     g_winStart = svcGetSystemTick();
     g_winCaptureTicks = g_winWriteTicks = 0;
     g_winFrames = 0;
@@ -426,7 +425,6 @@ static void flashbackFillMissed(u32 missed)
     u32 last = (g_head + g_frames - 1) % g_frames;
     u32 repeat = g_repeat[last] + missed;
     g_repeat[last] = repeat > 0xFFFF ? 0xFFFF : (u16)repeat;
-    g_statDropped += missed;
 }
 
 // ---------------------------------------------------------------------------
@@ -1228,10 +1226,20 @@ void FlashbackMenu_Show(void)
         posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Format:     %s\n\n",
                                         g_saveFormat == FLASHBACK_FORMAT_RAW ? "raw video (.raw + .txt)" : "16-bit BMP frames");
 
-        posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Buffered:  %lu / %lu frames\n",
-                                        applied ? g_count : 0, frames);
-        posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Rate:      %lu.%lu / %lu fps, %lu duplicated\n",
-                                        g_statFpsX10 / 10, g_statFpsX10 % 10, fps, g_statDropped);
+        // Counted the same way a save would be: frame times in the clip, and
+        // how many of those are dropped frames filled with a copy.
+        u32 buffered = 0, dropped = 0;
+        if (applied && g_active)
+        {
+            FlashbackClipPlan plan = flashbackPlanClip();
+            buffered = plan.frames;
+            dropped = plan.frames - plan.slots;
+        }
+
+        posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Buffered:  %lu / %lu frames, %lu dropped\n",
+                                        buffered, frames, dropped);
+        posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Rate:      %lu.%lu / %lu fps\n",
+                                        g_statFpsX10 / 10, g_statFpsX10 % 10, fps);
         posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Per frame: capture %lu.%lums, write %lu.%lums\n",
                                         g_statCaptureUs / 1000, (g_statCaptureUs / 100) % 10,
                                         g_statWriteUs / 1000, (g_statWriteUs / 100) % 10);

@@ -48,7 +48,7 @@ You can also save from the Flashback screen with <kbd>X</kbd>. Recording pauses 
 
 Turning recording off, or changing the resolution or frame rate, clears the 10-second buffer. Changing the save format doesn't. Opening a menu only pauses recording, so the buffer is kept.
 
-The screen also shows live stats. **Rate** should stay close to the frame rate you picked. If **duplicated** keeps climbing, your SD card can't keep up with the current settings: missed frames are filled with copies of the previous frame so clips still play at the right speed, but a lower resolution or frame rate will look smoother.
+The screen also shows live stats. **Rate** should stay close to the frame rate you picked. **Buffered** shows how many frames a save would contain right now, and how many of them are **dropped** frames: frames the recorder missed because your SD card couldn't keep up, filled with a copy of the previous frame so clips still play at the right speed. If many frames are dropped, a lower resolution or frame rate will look smoother.
 
 **Changing the save hotkey:** press <kbd>Select</kbd>, hold the new combination (at least 2 buttons), then let go. Combos that overlap the Rosalina menu combo aren't allowed.
 
