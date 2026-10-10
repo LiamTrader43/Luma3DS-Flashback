@@ -50,7 +50,9 @@ Turning recording off, or changing the resolution or frame rate, clears the 10-s
 
 The screen also shows live stats. **Rate** should stay close to the frame rate you picked. **Buffered** shows how many frames a save would contain right now, and how many of them are **dropped** frames: frames the recorder missed because your SD card couldn't keep up, filled with a copy of the previous frame so clips still play at the right speed. If many frames are dropped, a lower resolution or frame rate will look smoother.
 
-**Changing the save hotkey:** press <kbd>Select</kbd>, hold the new combination (at least 2 buttons), then let go. Combos that overlap the Rosalina menu combo aren't allowed.
+**Changing the save hotkey:** press <kbd>Select</kbd>, hold the new combination (at least 2 buttons), then let go. If the combination can't be used, press <kbd>A</kbd> to try again. Combos that overlap the Rosalina menu combo aren't allowed.
+
+You can use <kbd>A</kbd>, <kbd>B</kbd>, <kbd>X</kbd>, <kbd>Y</kbd>, <kbd>L</kbd>, <kbd>R</kbd>, <kbd>Start</kbd>, <kbd>Select</kbd> and the D-Pad. **<kbd>ZL</kbd>, <kbd>ZR</kbd> and the C-Stick on New 3DS/2DS can't be used**: the system reports them through a separate input service that Rosalina doesn't read, so it never sees them being pressed. That's the same reason they can't be part of the Rosalina menu combo. The touchscreen and Circle Pad can't be used either.
 
 ### Where clips are saved and how to watch them
 

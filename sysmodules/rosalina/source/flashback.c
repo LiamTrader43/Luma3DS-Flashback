@@ -1161,38 +1161,56 @@ static void FlashbackMenu_ChangeHotkey(void)
     char current[128], entered[128];
     LumaConfig_ConvertComboToString(current, g_saveCombo);
 
-    Draw_Lock();
-    Draw_ClearFramebuffer();
-    Draw_DrawString(10, 10, COLOR_TITLE, "Flashback recorder: save hotkey");
-    u32 posY = Draw_DrawFormattedString(10, 30, COLOR_WHITE, "Current hotkey: %s\n\n", current);
-    Draw_DrawString(10, posY, COLOR_WHITE, "Hold the new hotkey (2 or more buttons),\nthen let go of all buttons.");
-    Draw_FlushFramebuffer();
-    Draw_Unlock();
-
-    u32 combo = waitCombo();    // waits for Select to be released first
-    if (combo == 0)             // menu closing (sleep, shell closed...)
-        return;
-
-    const char *error = flashbackCheckCombo(combo);
-    if (error == NULL)
-        g_saveCombo = combo;
-    LumaConfig_ConvertComboToString(entered, combo);
-
-    do
+    // Ask for a combo until a valid one is entered, or the user backs out.
+    for (;;)
     {
         Draw_Lock();
         Draw_ClearFramebuffer();
         Draw_DrawString(10, 10, COLOR_TITLE, "Flashback recorder: save hotkey");
-        posY = Draw_DrawFormattedString(10, 30, COLOR_WHITE, "You pressed: %s\n\n", entered);
-        if (error == NULL)
-            posY = Draw_DrawFormattedString(10, posY, COLOR_GREEN, "Save hotkey changed to %s.\n", entered);
-        else
-            posY = Draw_DrawFormattedString(10, posY, COLOR_RED, "%s\nThe hotkey is still %s.\n", error, current);
-        Draw_DrawString(10, posY + 10, COLOR_WHITE, "Press B to go back.");
+        u32 posY = Draw_DrawFormattedString(10, 30, COLOR_WHITE, "Current hotkey: %s\n\n", current);
+        Draw_DrawString(10, posY, COLOR_WHITE, "Hold the new hotkey (2 or more buttons),\nthen let go of all buttons.");
         Draw_FlushFramebuffer();
         Draw_Unlock();
+
+        u32 combo = waitCombo();    // waits for the previous buttons to be released first
+        if (combo == 0)             // menu closing (sleep, shell closed...)
+            return;
+
+        const char *error = flashbackCheckCombo(combo);
+        if (error == NULL)
+            g_saveCombo = combo;
+        LumaConfig_ConvertComboToString(entered, combo);
+
+        u32 pressed;
+        do
+        {
+            Draw_Lock();
+            Draw_ClearFramebuffer();
+            Draw_DrawString(10, 10, COLOR_TITLE, "Flashback recorder: save hotkey");
+            posY = Draw_DrawFormattedString(10, 30, COLOR_WHITE, "You pressed: %s\n\n", entered);
+            if (error == NULL)
+            {
+                posY = Draw_DrawFormattedString(10, posY, COLOR_GREEN, "Save hotkey changed to %s.\n", entered);
+                Draw_DrawString(10, posY + 10, COLOR_WHITE, "Press B to go back.");
+            }
+            else
+            {
+                posY = Draw_DrawFormattedString(10, posY, COLOR_RED, "%s\nThe hotkey is still %s.\n", error, current);
+                Draw_DrawString(10, posY + 10, COLOR_WHITE, "Press A to try again, or B to go back.");
+            }
+            Draw_FlushFramebuffer();
+            Draw_Unlock();
+
+            pressed = waitInput();
+            if (menuShouldExit)
+                return;
+        }
+        while (!(pressed & KEY_B) && !(error != NULL && (pressed & KEY_A)));
+
+        if (pressed & KEY_B)
+            return;
+        // A after an invalid combo: ask again.
     }
-    while (!(waitInput() & KEY_B) && !menuShouldExit);
 }
 
 void FlashbackMenu_Show(void)
