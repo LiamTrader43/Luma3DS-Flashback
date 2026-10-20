@@ -82,7 +82,12 @@ typedef enum FlashbackFormat {
 
 static const u32 g_fpsChoices[] = { 10, 20, 30 };
 #define FLASHBACK_FPS_CHOICES   (sizeof(g_fpsChoices) / sizeof(g_fpsChoices[0]))
-#define FLASHBACK_MAX_FRAMES    (FLASHBACK_SECONDS * 30)
+
+// Clip length in seconds (how much the ring buffer holds).
+static const u32 g_lengthChoices[] = { 5, 10, 15, 20, 25, 30 };
+#define FLASHBACK_LENGTH_CHOICES (sizeof(g_lengthChoices) / sizeof(g_lengthChoices[0]))
+#define FLASHBACK_DEFAULT_LENGTH_IDX 1      // 10 seconds
+#define FLASHBACK_MAX_FRAMES    (30 * 30)   // longest length at the highest frame rate
 
 static MyThread flashbackThread;
 static u8 CTR_ALIGN(8) flashbackThreadStack[0x2000];
@@ -93,6 +98,7 @@ static volatile bool g_enabled;         // user toggle
 // New 3DS; half resolution, 20 fps on Old 3DS (see flashbackApplyDefaults).
 static volatile u32  g_wantRes = FLASHBACK_RES_FULL;   // FlashbackResolution chosen in the menu
 static volatile u32  g_wantFpsIdx = 2;                 // index into g_fpsChoices chosen in the menu (30 fps)
+static volatile u32  g_wantLenIdx = FLASHBACK_DEFAULT_LENGTH_IDX; // index into g_lengthChoices chosen in the menu
 static volatile u32  g_saveFormat = FLASHBACK_FORMAT_RAW; // FlashbackFormat; takes effect on the next save
 static volatile u32  g_saveCombo = FLASHBACK_DEFAULT_SAVE_COMBO;
 
@@ -110,7 +116,8 @@ static char g_lastClip[96];
 // (when nothing is recording); read by the menu for display.
 static volatile u32 g_res = FLASHBACK_RES_FULL;
 static volatile u32 g_fpsIdx = 2;
-static u32 g_w, g_h, g_fps, g_frames;   // derived from g_res / g_fpsIdx
+static volatile u32 g_lenIdx = FLASHBACK_DEFAULT_LENGTH_IDX;
+static u32 g_w, g_h, g_fps, g_frames;   // derived from g_res / g_fpsIdx / g_lenIdx
 static u32 g_slotBytes, g_bmpBytes, g_bmpOffset, g_memSize;
 static u32 g_slotStride;                // ring and staging slot size: g_slotBytes rounded up to whole SD sectors
 
@@ -138,18 +145,14 @@ static u32   g_slotLen[FLASHBACK_MAX_FRAMES];
 // resolution at 30 fps needs uncompressed (5.8 MB/s); compression is what
 // closes that gap. (Batching several frames per SD request was tried and
 // didn't help: the time is in moving the bytes, not in each request.)
-//
-// The frame for ring slot r always goes to staging slot r % FLASHBACK_STAGE_SLOTS.
 #define FLASHBACK_STAGE_SLOTS   4
-_Static_assert((FLASHBACK_SECONDS * 10) % FLASHBACK_STAGE_SLOTS == 0 &&
-               (FLASHBACK_SECONDS * 20) % FLASHBACK_STAGE_SLOTS == 0 &&
-               (FLASHBACK_SECONDS * 30) % FLASHBACK_STAGE_SLOTS == 0,
-               "the staging slot count must divide every ring size");
 
+// Staging slots are used in order: frame number p (counting every frame ever
+// staged) goes to staging slot p % FLASHBACK_STAGE_SLOTS, independent of its
+// ring slot (stored next to it), so any ring size works.
 // g_stageProduced - g_stageConsumed frames are waiting, oldest first, starting
 // at staging slot g_stageConsumed % FLASHBACK_STAGE_SLOTS. Both counters only
-// ever increase; g_head is kept congruent to g_stageProduced modulo the slot
-// count (see flashbackStart).
+// ever increase.
 static u32 g_stageRingIdx[FLASHBACK_STAGE_SLOTS];  // ring slot of each staged frame
 static u32 g_stageLen[FLASHBACK_STAGE_SLOTS];      // bytes to write for each staged frame
 static volatile u32 g_stageProduced;    // frames staged (capture thread)
@@ -177,15 +180,16 @@ static volatile u32 g_writeTotalUs, g_writeTotalFrames;
 static u64 g_winStart, g_winCaptureTicks, g_winCompressTicks, g_winPackedBytes;
 static u32 g_winFrames, g_winWriteUs0, g_winWriteFrames0;
 
-static void flashbackApplyFormat(u32 res, u32 fpsIdx)
+static void flashbackApplyFormat(u32 res, u32 fpsIdx, u32 lenIdx)
 {
     g_res = res;
     g_fpsIdx = fpsIdx;
+    g_lenIdx = lenIdx;
 
     g_w = res == FLASHBACK_RES_FULL ? 400 : 200;
     g_h = res == FLASHBACK_RES_FULL ? 240 : 120;
     g_fps = g_fpsChoices[fpsIdx];
-    g_frames = FLASHBACK_SECONDS * g_fps;
+    g_frames = g_lengthChoices[lenIdx] * g_fps;
 
     g_slotBytes = g_w * g_h * 2;
     // Every ring slot starts on a 512-byte SD sector (half resolution frames,
@@ -712,10 +716,7 @@ static Result flashbackStart(void)
         return res;
     }
 
-    // The ring can start at any slot. Starting at the one matching the staging
-    // counter keeps ring slot r in staging slot r % FLASHBACK_STAGE_SLOTS
-    // (nothing is staged here, so the counters can't change under us).
-    g_head = g_stageProduced % FLASHBACK_STAGE_SLOTS;
+    g_head = 0;
     g_count = 0;
     memset(g_repeat, 0, sizeof(g_repeat));
     g_writeFailed = false;
@@ -747,7 +748,7 @@ static bool flashbackRecordFrame(void)
     if (g_stageProduced - g_stageConsumed >= FLASHBACK_STAGE_SLOTS)
         return false;
 
-    u32 slot = g_head % FLASHBACK_STAGE_SLOTS;  // == g_stageProduced % FLASHBACK_STAGE_SLOTS
+    u32 slot = g_stageProduced % FLASHBACK_STAGE_SLOTS;   // the oldest free staging slot
     u8 *stage = g_mem + slot * g_slotStride;
     u16 *frame = (u16 *)(g_mem + g_bmpOffset);  // capture buffer (only saves use it otherwise)
 
@@ -838,7 +839,7 @@ static void flashbackEncodeBmp(const u16 *src, u8 *out)
         memcpy(dst, src + y * g_w, rowBytes);
 }
 
-// Which ring slots make up a clip of the last FLASHBACK_SECONDS, oldest first,
+// Which ring slots make up a clip of the chosen length, oldest first,
 // with each slot repeated 1 + g_repeat[] times to fill missed frames.
 typedef struct FlashbackClipPlan {
     u32 slots;          // number of ring slots used
@@ -1215,7 +1216,7 @@ static s32 flashbackSave(void)
 
 #define FLASHBACK_SETTINGS_FILE     FLASHBACK_DIR "/settings.bin"
 #define FLASHBACK_SETTINGS_MAGIC    0x54534246  // "FBST"
-#define FLASHBACK_SETTINGS_VERSION  1
+#define FLASHBACK_SETTINGS_VERSION  2   // 2: added lenIdx (version 1 files still load)
 
 typedef struct FlashbackSettings {
     u32 magic;
@@ -1226,7 +1227,12 @@ typedef struct FlashbackSettings {
     u8  fpsIdx;         // index into g_fpsChoices
     u8  format;         // FlashbackFormat
     u32 saveCombo;
+    // Version 2:
+    u8  lenIdx;         // index into g_lengthChoices
+    u8  reserved[3];
 } FlashbackSettings;
+
+#define FLASHBACK_SETTINGS_V1_SIZE  16  // everything up to and including saveCombo
 
 static const char *flashbackCheckCombo(u32 combo);
 
@@ -1242,6 +1248,7 @@ static FlashbackSettings flashbackCurrentSettings(void)
     s.fpsIdx = (u8)g_wantFpsIdx;
     s.format = (u8)g_saveFormat;
     s.saveCombo = g_saveCombo;
+    s.lenIdx = (u8)g_wantLenIdx;
     return s;
 }
 
@@ -1272,9 +1279,13 @@ static void flashbackLoadSettings(void)
     Result res = IFile_Read(&file, &total, &s, sizeof(s));
     IFile_Close(&file);
 
-    if (R_FAILED(res) || total < sizeof(s) || s.magic != FLASHBACK_SETTINGS_MAGIC || s.version != FLASHBACK_SETTINGS_VERSION)
+    if (R_FAILED(res) || total < FLASHBACK_SETTINGS_V1_SIZE || s.magic != FLASHBACK_SETTINGS_MAGIC ||
+        s.version < 1 || s.version > FLASHBACK_SETTINGS_VERSION)
         return;
 
+    // Version 1 files end before lenIdx: the length keeps its default.
+    if (s.version >= 2 && total >= sizeof(s) && s.lenIdx < FLASHBACK_LENGTH_CHOICES)
+        g_wantLenIdx = s.lenIdx;
     if (s.res < FLASHBACK_RES_COUNT)
         g_wantRes = s.res;
     if (s.fpsIdx < FLASHBACK_FPS_CHOICES)
@@ -1410,7 +1421,7 @@ static void flashbackThreadMain(void)
     flashbackApplyDefaults();
     if (sdMode)
         flashbackLoadSettings();
-    flashbackApplyFormat(g_wantRes, g_wantFpsIdx);
+    flashbackApplyFormat(g_wantRes, g_wantFpsIdx, g_wantLenIdx);
 
     u64 period = SYSCLOCK_ARM11 / g_fps;
     u64 nextTick = svcGetSystemTick();
@@ -1453,10 +1464,10 @@ static void flashbackThreadMain(void)
 
         // Settings changed in the menu: the ring layout depends on them, so
         // drop the buffer and restart with the new format.
-        if (g_wantRes != g_res || g_wantFpsIdx != g_fpsIdx)
+        if (g_wantRes != g_res || g_wantFpsIdx != g_fpsIdx || g_wantLenIdx != g_lenIdx)
         {
             flashbackStop();
-            flashbackApplyFormat(g_wantRes, g_wantFpsIdx);
+            flashbackApplyFormat(g_wantRes, g_wantFpsIdx, g_wantLenIdx);
             period = SYSCLOCK_ARM11 / g_fps;
             nextTick = svcGetSystemTick();
             wasRecording = false;
@@ -1649,8 +1660,9 @@ void FlashbackMenu_Show(void)
         // What the settings will be once applied (they apply within one frame).
         u32 res = g_wantRes;
         u32 fps = g_fpsChoices[g_wantFpsIdx];
-        u32 frames = FLASHBACK_SECONDS * fps;
-        bool applied = res == g_res && g_wantFpsIdx == g_fpsIdx;
+        u32 seconds = g_lengthChoices[g_wantLenIdx];
+        u32 frames = seconds * fps;
+        bool applied = res == g_res && g_wantFpsIdx == g_fpsIdx && g_wantLenIdx == g_lenIdx;
 
         Draw_Lock();
         Draw_ClearFramebuffer();
@@ -1665,7 +1677,7 @@ void FlashbackMenu_Show(void)
         posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Recording:  %s\n", g_enabled ? "on" : "off");
         posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Resolution: %s\n",
                                         res == FLASHBACK_RES_FULL ? "full (400x240)" : "half (200x120)");
-        posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Frame rate: %lu fps\n", fps);
+        posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Frame rate: %lu fps   Length: %lu s\n", fps, seconds);
         posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Format:     %s\n\n",
                                         g_saveFormat == FLASHBACK_FORMAT_RAW ? "raw video (.raw + .txt)" : "16-bit BMP frames");
 
@@ -1706,9 +1718,9 @@ void FlashbackMenu_Show(void)
 
         posY += 10;
         posY = Draw_DrawString(10, posY, COLOR_WHITE, "A: recording on/off   X: save clip now\n");
-        posY = Draw_DrawString(10, posY, COLOR_WHITE, "Y: resolution   Left/Right: frame rate\n");
+        posY = Draw_DrawString(10, posY, COLOR_WHITE, "Y: resolution   Left/Right: fps   L/R: length\n");
         posY = Draw_DrawString(10, posY, COLOR_WHITE, "Up/Down: format   Select: hotkey   B: back\n");
-        posY = Draw_DrawString(10, posY, COLOR_WHITE, "Turning off or changing res/fps clears the buffer.\n\n");
+        posY = Draw_DrawString(10, posY, COLOR_WHITE, "Off or res/fps/length changes clear the buffer.\n\n");
         LumaConfig_ConvertComboToString(comboStr, g_saveCombo);
         Draw_DrawFormattedString(10, posY, COLOR_WHITE, "In game: %s saves a clip.", comboStr);
 
@@ -1736,6 +1748,10 @@ void FlashbackMenu_Show(void)
             g_wantFpsIdx = (g_wantFpsIdx + FLASHBACK_FPS_CHOICES - 1) % FLASHBACK_FPS_CHOICES;
         else if ((pressed & (KEY_DUP | KEY_DDOWN)) && !busy)
             g_saveFormat = (g_saveFormat + 1) % FLASHBACK_FORMAT_COUNT;
+        else if ((pressed & KEY_R) && !busy && g_wantLenIdx + 1 < FLASHBACK_LENGTH_CHOICES)
+            g_wantLenIdx = g_wantLenIdx + 1;    // longer (stops at 30 s)
+        else if ((pressed & KEY_L) && !busy && g_wantLenIdx > 0)
+            g_wantLenIdx = g_wantLenIdx - 1;    // shorter (stops at 5 s)
         else if (pressed & KEY_SELECT)
             FlashbackMenu_ChangeHotkey();
         else if (pressed & KEY_B)

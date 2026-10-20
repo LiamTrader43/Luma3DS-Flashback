@@ -12,7 +12,7 @@
 
 ## Flashback recorder
 
-Flashback is a "replay buffer" for the 3DS top screen. While recording is on, it keeps the **last 10 seconds** of gameplay. When something worth keeping happens, press a button combo and those 10 seconds are saved to the SD card as a video file.
+Flashback is a "replay buffer" for the 3DS top screen. While recording is on, it keeps the **last 10 seconds** of gameplay (adjustable from 5 to 30 seconds). When something worth keeping happens, press a button combo and those seconds are saved to the SD card as a video file.
 
 It is built into Rosalina, so it works in **any game**, including retail games, without plugins. It uses none of the game's memory and has no noticeable effect on game performance.
 
@@ -29,7 +29,7 @@ To check that you're running Flashback, open the Rosalina menu (<kbd>L+Down+Sele
 
 1. Open the Rosalina menu with <kbd>L+Down+Select</kbd> and choose **Flashback recorder**.
 2. Press <kbd>A</kbd> to turn **Recording** on, then press <kbd>B</kbd> twice to return to your game.
-3. Play. Flashback always keeps the most recent 10 seconds.
+3. Play. Flashback always keeps the most recent 10 seconds (or the length you've chosen).
 4. When you want to keep a moment, press <kbd>L+R+Down</kbd>. The bottom screen gets a see-through **white** tint while saving, then briefly turns **green** when the clip is saved (or **red** if something went wrong). You can keep seeing and using the bottom screen the whole time.
 
 You can also save from the Flashback screen with <kbd>X</kbd>. Recording pauses while any Rosalina menu is open (the game is paused too), so saving from the menu doesn't add frozen frames to the end of your clip.
@@ -42,13 +42,16 @@ You can also save from the Flashback screen with <kbd>X</kbd>. Recording pauses 
 | <kbd>X</kbd> | Save a clip now |
 | <kbd>Y</kbd> | Resolution: half (200x120) or full (400x240) |
 | <kbd>Left</kbd>/<kbd>Right</kbd> | Frame rate: 10, 20 or 30 fps |
+| <kbd>L</kbd>/<kbd>R</kbd> | Clip length: 5 to 30 seconds, in 5-second steps |
 | <kbd>Up</kbd>/<kbd>Down</kbd> | Save format: raw video or BMP frames |
 | <kbd>Select</kbd> | Change the save hotkey |
 | <kbd>B</kbd> | Back |
 
-Turning recording off, or changing the resolution or frame rate, clears the 10-second buffer. Changing the save format doesn't. Opening a menu only pauses recording, so the buffer is kept.
+Turning recording off, or changing the resolution, frame rate or length, clears the buffer. Changing the save format doesn't. Opening a menu only pauses recording, so the buffer is kept.
 
-The screen also shows live stats. **Rate** should stay close to the frame rate you picked. **Buffered** shows how many frames a save would contain right now, and how many of them are **dropped** frames: frames the recorder missed because your SD card couldn't keep up, filled with a copy of the previous frame so clips still play at the right speed. If many frames are dropped, a lower resolution or frame rate will look smoother.
+Longer clips take longer to save, and recording is paused while a clip is saved. At full resolution and 30 fps, saving takes about 1.5 times the clip's length: a 30-second clip took about 46 seconds to save on a New 3DS XL.
+
+The screen also shows live stats. **Rate** should stay close to the frame rate you picked. **Buffered** shows how many frames a save would contain right now, and how many of them are **dropped** frames: frames the recorder missed because it couldn't keep up, filled with a copy of the previous frame so clips still play at the right speed. If many frames are dropped, a lower resolution or frame rate will look smoother.
 
 **Changing the save hotkey:** press <kbd>Select</kbd>, hold the new combination (at least 2 buttons), then let go. If the combination can't be used, press <kbd>A</kbd> to try again. Combos that overlap the Rosalina menu combo aren't allowed.
 
@@ -78,18 +81,18 @@ ffmpeg -framerate 30 -i frame_%03d.bmp -vf "scale=iw*2:ih*2:flags=neighbor" -c:v
 
 ### SD card usage
 
-The buffer lives in `/luma/flashback/ring.bin` on the SD card, and recording writes to it continuously.
+The buffer lives in `/luma/flashback/ring.bin` on the SD card, and recording writes to it continuously. Frames are compressed (losslessly) before they're written, typically to around half their size, so the amount written depends on the game.
 
-| Setting | Buffer file size | Saved clip (raw) | Written while recording |
+| Setting | Buffer file size (10 s) | Saved clip, raw (10 s) | Written while recording |
 |---|---|---|---|
-| Half resolution, 10 fps | 4.8 MB | 4.8 MB | about 1.7 GB per hour |
-| Full resolution, 30 fps | 58 MB | 58 MB | about 21 GB per hour |
+| Half resolution, 10 fps | 4.8 MB | 4.8 MB | up to about 1.7 GB per hour |
+| Full resolution, 30 fps | 58 MB | 58 MB | up to about 21 GB per hour, typically around half that |
 
-A good-quality SD card handles this easily, but continuous writing does add wear, especially at full resolution and 30 fps. Turn recording off when you don't need it.
+Sizes scale with the length: a 30-second buffer and clip are 3 times the sizes above. A good-quality SD card handles this easily, but continuous writing does add wear, especially at full resolution and 30 fps. Turn recording off when you don't need it.
 
 ### Limitations
 
-* **Recording is always off after a reboot**: turn it on from the Flashback screen each time. Your other settings (resolution, frame rate, format and hotkey) are remembered in `/luma/flashback/settings.bin` when you leave the Flashback screen. Delete that file to go back to the defaults: full resolution and 30 fps on New 3DS/2DS (half resolution and 20 fps on Old 3DS/2DS), raw format, hotkey <kbd>L+R+Down</kbd>.
+* **Recording is always off after a reboot**: turn it on from the Flashback screen each time. Your other settings (resolution, frame rate, length, format and hotkey) are remembered in `/luma/flashback/settings.bin` when you leave the Flashback screen. Delete that file to go back to the defaults: full resolution and 30 fps on New 3DS/2DS (half resolution and 20 fps on Old 3DS/2DS), 10 seconds, raw format, hotkey <kbd>L+R+Down</kbd>.
 * **Only the top screen** is recorded, and only the left eye when 3D is on. There is no audio.
 * **SD card only**: Flashback is disabled when Luma3DS boots from the internal memory (NAND).
 * **Old 3DS/2DS are slower**: they have a much slower CPU, so higher settings can make games run slower. That's why they default to half resolution and 20 fps. If a game slows down, lower the resolution or frame rate.

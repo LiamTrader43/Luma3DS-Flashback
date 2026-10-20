@@ -26,25 +26,23 @@
 
 // Flashback: rolling "last N seconds" recorder for the top screen.
 //
-// Runs as a Rosalina thread, so it costs the running game no memory: frames
-// are read straight from the display hardware's current framebuffer (like the
+// Runs as Rosalina threads, so it costs the running game no memory: frames are
+// read straight from the display hardware's current framebuffer (like the
 // screenshot feature), converted to RGB565 at half (200x120) or full (400x240)
-// resolution, and written to a ring file on the SD card at 10, 20 or 30 fps.
-// Saving turns the ring into a numbered BMP sequence in
-// /luma/flashback/clip_<date>/.
+// resolution at 10, 20 or 30 fps, compressed losslessly, and written to a ring
+// file on the SD card holding the last 5 to 30 seconds. Saving writes the
+// clip uncompressed, as one raw video file (/luma/flashback/clip_<date>.raw,
+// with a .txt describing it) or as numbered BMPs in /luma/flashback/clip_<date>/.
 //
-// Per 10 s clip:      ring file    BMPs written on save
-//   half, 10 fps         4.8 MB       7 MB
-//   full, 30 fps         58 MB      86 MB
-// If the SD card can't keep up, frames are skipped (see the stats in the
-// Flashback menu) and clips play back too fast.
+// Uncompressed, a second of footage is 1.4 MB at half resolution and 30 fps,
+// and 5.8 MB at full resolution and 30 fps (the ring file is sized for that).
+// Frames the recorder misses (SD card or CPU too slow) are filled with copies
+// of the previous frame, so clips always play back at the right speed.
 
 #pragma once
 
 #include <3ds/types.h>
 #include "MyThread.h"
-
-#define FLASHBACK_SECONDS   10
 
 #define FLASHBACK_DIR       "/luma/flashback"
 #define FLASHBACK_RING_FILE FLASHBACK_DIR "/ring.bin"
