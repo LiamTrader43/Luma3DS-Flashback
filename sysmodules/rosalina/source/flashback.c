@@ -72,7 +72,7 @@ typedef enum FlashbackResolution {
 } FlashbackResolution;
 
 typedef enum FlashbackFormat {
-    FLASHBACK_FORMAT_RAW = 0,   // one .raw video file + .txt with the ffmpeg command (fastest)
+    FLASHBACK_FORMAT_RAW = 0,   // one .flb clip file, converted on a PC (fastest: the ring file is renamed)
     FLASHBACK_FORMAT_BMP,       // folder of 16-bit BMP frames
     FLASHBACK_FORMAT_COUNT,
 } FlashbackFormat;
@@ -158,6 +158,7 @@ static u32 g_stageLen[FLASHBACK_STAGE_SLOTS];      // bytes to write for each st
 static volatile u32 g_stageProduced;    // frames staged (capture thread)
 static volatile u32 g_stageConsumed;    // frames written or given up on (writer thread)
 static volatile bool g_writeFailed;     // a ring write failed (writer -> capture thread)
+static bool g_ringLost;                 // a save couldn't reopen/recreate the ring file
 static LightEvent g_writeEvent;         // signaled when a frame is staged
 
 static MyThread flashbackWriterThread;
@@ -676,6 +677,25 @@ static void flashbackDrainWrites(void)
     __sync_synchronize();
 }
 
+// Opens (creating it if needed) the ring file at its full size. Allocating the
+// whole ring up front claims the SD space now rather than during gameplay, and
+// a full card fails here instead of mid-recording. Contents don't matter to a
+// new buffer (g_count starts at 0); reopening an existing ring keeps them.
+static Result flashbackOpenRing(FS_Archive archive)
+{
+    Result res = IFile_OpenFromArchive(&g_ring, archive, fsMakePath(PATH_ASCII, FLASHBACK_RING_FILE),
+                                       FS_OPEN_CREATE | FS_OPEN_READ | FS_OPEN_WRITE);
+    if (R_SUCCEEDED(res))
+    {
+        res = IFile_SetSize(&g_ring, (u64)g_frames * g_slotStride);
+        if (R_SUCCEEDED(res))
+            FSFILE_SetPriority(g_ring.handle, FLASHBACK_RING_FS_PRIORITY);
+        else
+            IFile_Close(&g_ring);
+    }
+    return res;
+}
+
 static Result flashbackStart(void)
 {
     Result res;
@@ -693,19 +713,7 @@ static Result flashbackStart(void)
     {
         res = flashbackCreateDirectory(archive, FLASHBACK_DIR);
         if (R_SUCCEEDED(res))
-            res = IFile_OpenFromArchive(&g_ring, archive, fsMakePath(PATH_ASCII, FLASHBACK_RING_FILE),
-                                        FS_OPEN_CREATE | FS_OPEN_READ | FS_OPEN_WRITE);
-        if (R_SUCCEEDED(res))
-        {
-            // Allocate the whole ring up front, so SD space is claimed now
-            // rather than during gameplay, and a full card fails here instead
-            // of mid-recording. Old contents don't matter: g_count starts at 0.
-            res = IFile_SetSize(&g_ring, (u64)g_frames * g_slotStride);
-            if (R_SUCCEEDED(res))
-                FSFILE_SetPriority(g_ring.handle, FLASHBACK_RING_FS_PRIORITY);
-            else
-                IFile_Close(&g_ring);
-        }
+            res = flashbackOpenRing(archive);
         FSUSER_CloseArchive(archive);
     }
 
@@ -720,6 +728,7 @@ static Result flashbackStart(void)
     g_count = 0;
     memset(g_repeat, 0, sizeof(g_repeat));
     g_writeFailed = false;
+    g_ringLost = false;
     g_active = true;
     flashbackResetStats();
     return 0;
@@ -1000,173 +1009,111 @@ end:
     return written;
 }
 
-static void flashbackWriteTextFile(FS_Archive archive, const char *path, const char *text)
-{
-    IFile file = {0};
-    u64 total;
-    if (R_SUCCEEDED(IFile_OpenFromArchive(&file, archive, fsMakePath(PATH_ASCII, path), FS_OPEN_CREATE | FS_OPEN_WRITE)))
-    {
-        IFile_Write(&file, &total, text, strlen(text), 0);
-        IFile_Close(&file);
-    }
-}
+// Clip file format (<clip>.flb): the ring file itself, renamed, with an index
+// and a trailer appended. Saving this way copies no frame data, so it takes a
+// few seconds however long the clip is; the PC-side converter
+// (convert_flashback.bat, in https://github.com/LiamTrader43/Flashback-Studio)
+// decodes it into a video. Keep that reader in step with any change here.
+//
+//   [ring slots]    slot i at offset i * slotStride: a compressed frame, or the
+//                   raw frame if its size is slotBytes (see flashbackCompress)
+//   [index]         entryCount x { u32 slot, u32 size, u32 copies }: the clip's
+//                   frames oldest first, each slot shown 'copies' times
+//   [trailer]       FlashbackClipTrailer, the last 48 bytes of the file
+// All values little-endian. Frames are RGB565, top row first.
 
-// Raw format: <clip>.raw holds every frame back to back (RGB565 little-endian,
-// top row first), plus <clip>.txt describing it (read by the PC-side
-// convert_flashback.bat) with the ffmpeg command to convert it.
-// Writes the first 'frames' frames of the save buffer to the clip in one request.
-static bool flashbackWriteFrames(IFile *file, const u8 *data, u32 frames)
-{
-    u64 total;
-    u32 len = frames * g_slotBytes;
-    return frames == 0 || (R_SUCCEEDED(IFile_Write(file, &total, data, len, 0)) && total == len);
-}
+#define FLASHBACK_CLIP_MAGIC    0x4B424C46  // "FLBK"
+#define FLASHBACK_CLIP_VERSION  1
 
-// Fills the raw clip, moving as many frames per SD request as the save buffer
-// holds: runs of neighbouring ring slots are read in one request, spread out
-// in the buffer to make room for their duplicates, and written in one request.
-// Returns the number of frames written.
-static s32 flashbackWriteRawFrames(IFile *file, const FlashbackClipPlan *plan, FlashbackSaveBuffer *buf)
-{
-    u8 *data = buf->data;
-    const u32 cap = buf->frames;
-    u32 n = 0;          // frames waiting in the buffer
-    s32 written = 0;
+typedef struct FlashbackClipTrailer {
+    u32 magic;
+    u32 version;
+    u32 width, height, fps;
+    u32 slotStride;     // bytes between ring slots
+    u32 slotBytes;      // size of an uncompressed frame
+    u32 entryCount;     // index entries
+    u32 frameCount;     // frames in the clip, copies included
+    u32 indexOffset;    // where the index starts
+    u32 reserved[2];
+} FlashbackClipTrailer;
+_Static_assert(sizeof(FlashbackClipTrailer) == 48, "the clip trailer is 48 bytes");
 
-    for (u32 i = 0; i < plan->slots; )
+// Builds the clip's index and trailer into 'buf'; returns their size.
+static u32 flashbackBuildClipIndex(const FlashbackClipPlan *plan, u32 indexOffset, u8 *buf)
+{
+    u32 *entry = (u32 *)buf;
+    for (u32 i = 0; i < plan->slots; i++)
     {
         u32 copies;
         u32 idx = flashbackPlanSlot(plan, i, &copies);
-
-        if (copies > cap - n)
-        {
-            if (n != 0)
-            {
-                // Make room first.
-                if (!flashbackWriteFrames(file, data, n))
-                    return written;
-                written += n;
-                n = 0;
-                continue;
-            }
-
-            // A long run of duplicates (bigger than the whole buffer): fill the
-            // buffer with copies of this frame and write it as many times as needed.
-            if (!flashbackReadSlots(idx, 1, data))
-                return written;
-            for (u32 r = 1; r < cap; r++)
-                memcpy(data + r * g_slotBytes, data, g_slotBytes);
-            for (u32 left = copies; left != 0; )
-            {
-                u32 w = left < cap ? left : cap;
-                if (!flashbackWriteFrames(file, data, w))
-                    return written;
-                written += w;
-                left -= w;
-            }
-            i++;
-            continue;
-        }
-
-        // Gather neighbouring ring slots whose frames (with duplicates) fit.
-        u32 maxRun = flashbackContiguousSlots(plan, i, cap - n);
-        u32 k = 0, need = 0;
-        while (k < maxRun)
-        {
-            u32 c;
-            flashbackPlanSlot(plan, i + k, &c);
-            if (need + c > cap - n)
-                break;
-            need += c;
-            k++;
-        }
-
-        // One read for the whole run, into the next free buffer slots...
-        if (!flashbackReadSlots(idx, k, data + n * g_slotBytes))
-            return written;
-
-        // ...then spread it out back to front, so each frame only ever moves
-        // forward and nothing is overwritten before it is copied.
-        u32 dest = n + need;
-        for (u32 j = k; j-- > 0; )
-        {
-            u32 c;
-            flashbackPlanSlot(plan, i + j, &c);
-            dest -= c;
-            const u8 *src = data + (n + j) * g_slotBytes;
-            for (u32 r = c; r-- > 0; )
-            {
-                u8 *d = data + (dest + r) * g_slotBytes;
-                if (d != src)
-                    memcpy(d, src, g_slotBytes);
-            }
-        }
-
-        n += need;
-        i += k;
-
-        if (n == cap)
-        {
-            if (!flashbackWriteFrames(file, data, n))
-                return written;
-            written += n;
-            n = 0;
-        }
+        *entry++ = idx;
+        *entry++ = g_slotLen[idx];
+        *entry++ = copies;
     }
 
-    if (flashbackWriteFrames(file, data, n))
-        written += n;
-    return written;
+    FlashbackClipTrailer *t = (FlashbackClipTrailer *)entry;
+    memset(t, 0, sizeof(*t));
+    t->magic = FLASHBACK_CLIP_MAGIC;
+    t->version = FLASHBACK_CLIP_VERSION;
+    t->width = g_w;
+    t->height = g_h;
+    t->fps = g_fps;
+    t->slotStride = g_slotStride;
+    t->slotBytes = g_slotBytes;
+    t->entryCount = plan->slots;
+    t->frameCount = plan->frames;
+    t->indexOffset = indexOffset;
+    return (u32)((u8 *)(t + 1) - buf);
 }
 
-static s32 flashbackSaveRaw(FS_Archive archive, const char *clip, const char *clipName, const FlashbackClipPlan *plan)
+// Saves the clip by turning the ring file into it, then starts a fresh ring.
+// Needs the writer to be idle (flashbackDrainWrites).
+static s32 flashbackSaveClipFile(FS_Archive archive, const char *clip, const FlashbackClipPlan *plan)
 {
     char path[128];
-    char *text = (char *)(g_mem + g_bmpOffset);    // the BMP buffer is free in this format
+    u64 total;
     IFile file = {0};
+    sprintf(path, "%s.flb", clip);
 
-    sprintf(path, "%s.raw", clip);
-    if (R_FAILED(IFile_OpenFromArchive(&file, archive, fsMakePath(PATH_ASCII, path), FS_OPEN_CREATE | FS_OPEN_WRITE)))
-        return -2;
+    // The ring always starts at slot 0, so until it has wrapped once the clip
+    // only uses its first g_count slots: the rest can be trimmed off.
+    u32 dataEnd = (g_count < g_frames ? g_count : g_frames) * g_slotStride;
+    u8 *index = g_mem + g_bmpOffset;    // scratch buffer, free while saving
+    u32 indexSize = flashbackBuildClipIndex(plan, dataEnd, index);
 
-    // One allocation up front instead of growing the file frame by frame.
-    IFile_SetSize(&file, (u64)plan->frames * g_slotBytes);
-
-    FlashbackSaveBuffer buf = flashbackAllocSaveBuffer();
-    s32 written = flashbackWriteRawFrames(&file, plan, &buf);
-    flashbackFreeSaveBuffer(&buf);
-
-    if ((u32)written != plan->frames)
-        IFile_SetSize(&file, (u64)written * g_slotBytes); // don't leave unwritten frames at the end
-    IFile_Close(&file);
-
-    if (written == 0)
+    IFile_Close(&g_ring);
+    if (R_FAILED(FSUSER_RenameFile(archive, fsMakePath(PATH_ASCII, FLASHBACK_RING_FILE),
+                                   archive, fsMakePath(PATH_ASCII, path))))
     {
-        // Nothing usable: don't leave an empty .raw behind.
-        FSUSER_DeleteFile(archive, fsMakePath(PATH_ASCII, path));
-        return written;
+        // Nothing moved: keep recording into the same ring, buffer intact.
+        if (R_FAILED(flashbackOpenRing(archive)))
+            g_ringLost = true;
+        return -2;
     }
 
-    char command[320];
-    sprintf(command,
-        "ffmpeg -f rawvideo -pixel_format rgb565le -video_size %lux%lu -framerate %lu -i \"%s.raw\" "
-        "-vf \"scale=iw*2:ih*2:flags=neighbor\" -c:v libx264 -crf 12 -pix_fmt yuv420p \"%s.mp4\"",
-        g_w, g_h, g_fps, clipName, clipName);
+    s32 result = (s32)plan->frames;
+    bool ok = R_SUCCEEDED(IFile_OpenFromArchive(&file, archive, fsMakePath(PATH_ASCII, path), FS_OPEN_WRITE)) &&
+              R_SUCCEEDED(IFile_SetSize(&file, dataEnd));
+    if (ok)
+    {
+        file.pos = dataEnd;
+        ok = R_SUCCEEDED(IFile_Write(&file, &total, index, indexSize, 0)) && total == indexSize;
+    }
+    IFile_Close(&file);
+    if (!ok)
+    {
+        // Without its index the clip can't be decoded: don't leave it behind.
+        FSUSER_DeleteFile(archive, fsMakePath(PATH_ASCII, path));
+        result = -3;
+    }
 
-    sprintf(text,
-        "Flashback clip\r\n"
-        "Resolution:   %lux%lu\r\n"
-        "Frame rate:   %lu fps\r\n"
-        "Frames:       %ld\r\n"
-        "Pixel format: RGB565 little-endian, top row first, no header\r\n"
-        "\r\n"
-        "Convert to MP4 with ffmpeg (run in this folder):\r\n"
-        "%s\r\n",
-        g_w, g_h, g_fps, written, command);
-    sprintf(path, "%s.txt", clip);
-    flashbackWriteTextFile(archive, path, text);
-
-    return written;
+    // The old buffer is now the clip: continue with an empty one.
+    g_head = 0;
+    g_count = 0;
+    memset(g_repeat, 0, sizeof(g_repeat));
+    if (R_FAILED(flashbackOpenRing(archive)))
+        g_ringLost = true;  // no space for a new ring: the capture thread stops recording
+    return result;
 }
 
 // Returns the number of frames written, or a negative value:
@@ -1198,15 +1145,15 @@ static s32 flashbackSave(void)
 
     FlashbackClipPlan plan = flashbackPlanClip();
     g_lastSaveExpected = plan.frames;
-    bool raw = g_saveFormat == FLASHBACK_FORMAT_RAW;
-    s32 written = raw ? flashbackSaveRaw(archive, clip, clipName, &plan) : flashbackSaveBmp(archive, clip, &plan);
+    bool clipFile = g_saveFormat == FLASHBACK_FORMAT_RAW;
+    s32 written = clipFile ? flashbackSaveClipFile(archive, clip, &plan) : flashbackSaveBmp(archive, clip, &plan);
 
-    if (written == 0 && !raw)
+    if (written == 0 && !clipFile)
         FSUSER_DeleteDirectory(archive, fsMakePath(PATH_ASCII, clip)); // empty clip folder
 
     FSUSER_CloseArchive(archive);
     if (written > 0)
-        sprintf(g_lastClip, "%s%s", clip, raw ? ".raw" : "/");
+        sprintf(g_lastClip, "%s%s", clip, clipFile ? ".flb" : "/");
     return written != 0 ? written : -3;
 }
 
@@ -1513,6 +1460,16 @@ static void flashbackThreadMain(void)
             wasRecording = false;
         }
 
+        // A save turned the ring into a clip but there wasn't room for a new
+        // ring (each one is as big as a full clip): stop recording.
+        if (g_ringLost && g_active)
+        {
+            flashbackStop();
+            g_enabled = false;
+            g_recordError = "SD card full: recording stopped.";
+            wasRecording = false;
+        }
+
         // Frames sit on a fixed time grid (one slot every 'period'). Every
         // grid slot is either recorded or filled with a duplicate, so clips
         // keep real-time speed even when each frame takes longer than one
@@ -1679,7 +1636,7 @@ void FlashbackMenu_Show(void)
                                         res == FLASHBACK_RES_FULL ? "full (400x240)" : "half (200x120)");
         posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Frame rate: %lu fps   Length: %lu s\n", fps, seconds);
         posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Format:     %s\n\n",
-                                        g_saveFormat == FLASHBACK_FORMAT_RAW ? "raw video (.raw + .txt)" : "16-bit BMP frames");
+                                        g_saveFormat == FLASHBACK_FORMAT_RAW ? "clip file (.flb, fast)" : "BMP frames (slow)");
 
         // Counted the same way a save would be: frame times in the clip, and
         // how many of those are dropped frames filled with a copy.

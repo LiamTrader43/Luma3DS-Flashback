@@ -43,13 +43,13 @@ You can also save from the Flashback screen with <kbd>X</kbd>. Recording pauses 
 | <kbd>Y</kbd> | Resolution: half (200x120) or full (400x240) |
 | <kbd>Left</kbd>/<kbd>Right</kbd> | Frame rate: 10, 20 or 30 fps |
 | <kbd>L</kbd>/<kbd>R</kbd> | Clip length: 5 to 30 seconds, in 5-second steps |
-| <kbd>Up</kbd>/<kbd>Down</kbd> | Save format: raw video or BMP frames |
+| <kbd>Up</kbd>/<kbd>Down</kbd> | Save format: clip file (`.flb`) or BMP frames |
 | <kbd>Select</kbd> | Change the save hotkey |
 | <kbd>B</kbd> | Back |
 
 Turning recording off, or changing the resolution, frame rate or length, clears the buffer. Changing the save format doesn't. Opening a menu only pauses recording, so the buffer is kept.
 
-Longer clips take longer to save, and recording is paused while a clip is saved. At full resolution and 30 fps, saving takes about 1.5 times the clip's length: a 30-second clip took about 46 seconds to save on a New 3DS XL.
+Saving a clip file (the default format) takes only a few seconds, however long the clip is: the buffer itself becomes the clip, and recording carries on with a new, empty buffer. That new buffer needs free space on the SD card, as much as a full clip (up to 173 MB at full resolution, 30 fps and 30 seconds); if there isn't enough, recording stops and the Flashback screen says the SD card is full. Saving as BMP frames is much slower, and recording is paused while it runs.
 
 The screen also shows live stats. **Rate** should stay close to the frame rate you picked. **Buffered** shows how many frames a save would contain right now, and how many of them are **dropped** frames: frames the recorder missed because it couldn't keep up, filled with a copy of the previous frame so clips still play at the right speed. If many frames are dropped, a lower resolution or frame rate will look smoother.
 
@@ -61,17 +61,18 @@ You can use <kbd>A</kbd>, <kbd>B</kbd>, <kbd>X</kbd>, <kbd>Y</kbd>, <kbd>L</kbd>
 
 Clips are saved in `/luma/flashback/` on the SD card, named after the date and time they were saved.
 
-**Raw video (default, fastest to save).** Each clip is a `clip_<date>.raw` file plus a `clip_<date>.txt` that lists its resolution and frame rate, and contains a ready-to-use command to turn it into an MP4. To convert it:
+**Clip files (default, fastest to save).** Each clip is a single `clip_<date>.flb` file.
 
-1. Install [ffmpeg](https://ffmpeg.org/download.html) on your PC and make sure the `ffmpeg` command works in a terminal.
-2. Copy the `.raw` and `.txt` files to your PC.
-3. Open a terminal in that folder and run the command from the `.txt`. It looks like this:
+> **`.flb` clips can only be turned into videos with `convert_flashback.bat`** from [Flashback-Studio](https://github.com/LiamTrader43/Flashback-Studio). They use Flashback's own compressed format, so video players, video editors and other tools (plain ffmpeg included) can't open them. If a clip won't play or import, running it through `convert_flashback.bat` is the way to fix it.
 
-   ```
-   ffmpeg -f rawvideo -pixel_format rgb565le -video_size 400x240 -framerate 30 -i "clip_<date>.raw" -vf "scale=iw*2:ih*2:flags=neighbor" -c:v libx264 -crf 12 -pix_fmt yuv420p "clip_<date>.mp4"
-   ```
+To convert clips (Windows):
 
-The MP4 plays in any video player and imports into video editors like DaVinci Resolve. The command doubles the size with sharp pixels; for a 1080p editing timeline, use `scale=iw*4.5:ih*4.5:flags=neighbor` at full resolution instead.
+1. Install [ffmpeg](https://ffmpeg.org/download.html) and make sure the `ffmpeg` command works in a terminal (its `bin` folder must be on your PATH).
+2. Download `convert_flashback.bat` from [Flashback-Studio](https://github.com/LiamTrader43/Flashback-Studio), the companion project for Flashback clips.
+3. Copy your `.flb` clips from the SD card to your PC.
+4. Drag one or more clips onto `convert_flashback.bat`, or put it in the folder with your clips and double-click it to convert them all.
+
+Each clip becomes an MP4 next to it, at twice the size with sharp pixels. It plays in any video player and imports into video editors like DaVinci Resolve. Clips that already have an MP4 are skipped, and a clip that was copied incompletely is reported instead of converted. Clips saved by older Flashback builds (`.raw` with a `.txt`) convert the same way.
 
 **BMP frames.** Each clip is a `clip_<date>/` folder of numbered images (`frame_000.bmp`, `frame_001.bmp`, ...) that you can open directly. To turn them into a video, run this in the clip folder, using the frame rate you recorded at:
 
@@ -83,17 +84,18 @@ ffmpeg -framerate 30 -i frame_%03d.bmp -vf "scale=iw*2:ih*2:flags=neighbor" -c:v
 
 The buffer lives in `/luma/flashback/ring.bin` on the SD card, and recording writes to it continuously. Frames are compressed (losslessly) before they're written, typically to around half their size, so the amount written depends on the game.
 
-| Setting | Buffer file size (10 s) | Saved clip, raw (10 s) | Written while recording |
+| Setting | Buffer file size (10 s) | Saved clip, `.flb` (10 s) | Written while recording |
 |---|---|---|---|
-| Half resolution, 10 fps | 4.8 MB | 4.8 MB | up to about 1.7 GB per hour |
-| Full resolution, 30 fps | 58 MB | 58 MB | up to about 21 GB per hour, typically around half that |
+| Half resolution, 10 fps | 4.8 MB | up to 4.8 MB | up to about 1.7 GB per hour |
+| Full resolution, 30 fps | 58 MB | up to 58 MB | up to about 21 GB per hour, typically around half that |
 
-Sizes scale with the length: a 30-second buffer and clip are 3 times the sizes above. A good-quality SD card handles this easily, but continuous writing does add wear, especially at full resolution and 30 fps. Turn recording off when you don't need it.
+A saved clip is the buffer file itself, so it's the same size (smaller if you save before the buffer has filled up). Sizes scale with the length: a 30-second buffer and clip are 3 times the sizes above. A good-quality SD card handles this easily, but continuous writing does add wear, especially at full resolution and 30 fps. Turn recording off when you don't need it.
 
 ### Limitations
 
-* **Recording is always off after a reboot**: turn it on from the Flashback screen each time. Your other settings (resolution, frame rate, length, format and hotkey) are remembered in `/luma/flashback/settings.bin` when you leave the Flashback screen. Delete that file to go back to the defaults: full resolution and 30 fps on New 3DS/2DS (half resolution and 20 fps on Old 3DS/2DS), 10 seconds, raw format, hotkey <kbd>L+R+Down</kbd>.
+* **Recording is always off after a reboot**: turn it on from the Flashback screen each time. Your other settings (resolution, frame rate, length, format and hotkey) are remembered in `/luma/flashback/settings.bin` when you leave the Flashback screen. Delete that file to go back to the defaults: full resolution and 30 fps on New 3DS/2DS (half resolution and 20 fps on Old 3DS/2DS), 10 seconds, clip file format, hotkey <kbd>L+R+Down</kbd>.
 * **Only the top screen** is recorded, and only the left eye when 3D is on. There is no audio.
+* **Converting clips needs Windows**: `convert_flashback.bat` uses PowerShell, which comes with Windows. There's no converter for macOS or Linux yet.
 * **SD card only**: Flashback is disabled when Luma3DS boots from the internal memory (NAND).
 * **Old 3DS/2DS are slower**: they have a much slower CPU, so higher settings can make games run slower. That's why they default to half resolution and 20 fps. If a game slows down, lower the resolution or frame rate.
 
