@@ -95,7 +95,7 @@ static bool g_threadRunning;
 
 static volatile bool g_enabled;         // user toggle
 // Defaults when no settings are saved: full resolution, 30 fps, raw format on
-// New 3DS; half resolution, 20 fps on Old 3DS (see flashbackApplyDefaults).
+// New 3DS; half resolution, 30 fps on Old 3DS (see flashbackApplyDefaults).
 static volatile u32  g_wantRes = FLASHBACK_RES_FULL;   // FlashbackResolution chosen in the menu
 static volatile u32  g_wantFpsIdx = 2;                 // index into g_fpsChoices chosen in the menu (30 fps)
 static volatile u32  g_wantLenIdx = FLASHBACK_DEFAULT_LENGTH_IDX; // index into g_lengthChoices chosen in the menu
@@ -1213,14 +1213,12 @@ static FlashbackSettings flashbackCurrentSettings(void)
 
 // Old 3DS has a third of the CPU speed, and the system core Flashback runs on
 // also serves the game's graphics, input and file requests there, so it gets
-// lighter defaults. Saved settings still override these.
+// a lighter default: half resolution (at the same 30 fps). Saved settings still
+// override it.
 static void flashbackApplyDefaults(void)
 {
     if (!isN3DS)
-    {
         g_wantRes = FLASHBACK_RES_HALF;
-        g_wantFpsIdx = 1;   // 20 fps
-    }
 }
 
 // Loads saved settings, keeping the defaults for anything missing or invalid.

@@ -93,11 +93,11 @@ A saved clip is the buffer file itself, so it's the same size (smaller if you sa
 
 ### Limitations
 
-* **Recording is always off after a reboot**: turn it on from the Flashback screen each time. Your other settings (resolution, frame rate, length, format and hotkey) are remembered in `/luma/flashback/settings.bin` when you leave the Flashback screen. Delete that file to go back to the defaults: full resolution and 30 fps on New 3DS/2DS (half resolution and 20 fps on Old 3DS/2DS), 10 seconds, clip file format, hotkey <kbd>L+R+Down</kbd>.
+* **Recording is always off after a reboot**: turn it on from the Flashback screen each time. Your other settings (resolution, frame rate, length, format and hotkey) are remembered in `/luma/flashback/settings.bin` when you leave the Flashback screen. Delete that file to go back to the defaults: full resolution and 30 fps on New 3DS/2DS (half resolution and 30 fps on Old 3DS/2DS), 10 seconds, clip file format, hotkey <kbd>L+R+Down</kbd>.
 * **Only the top screen** is recorded, and only the left eye when 3D is on. There is no audio.
 * **Converting clips needs Windows**: `convert_flashback.bat` uses PowerShell, which comes with Windows. There's no converter for macOS or Linux yet.
 * **SD card only**: Flashback is disabled when Luma3DS boots from the internal memory (NAND).
-* **Old 3DS/2DS are slower**: they have a much slower CPU, so higher settings can make games run slower. That's why they default to half resolution and 20 fps. If a game slows down, lower the resolution or frame rate.
+* **Old 3DS/2DS are slower**: they have a much slower CPU, so higher settings can make games run slower. That's why they default to half resolution. If a game slows down, lower the resolution or frame rate.
 
 ## Description
 **Luma3DS** patches and reimplements significant parts of the system software running on all models of the Nintendo 3DS family of consoles. It aims to greatly improve the user experience and support the 3DS far beyond its end-of-life. Features include:
