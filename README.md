@@ -12,7 +12,7 @@
 
 ## Flashback recorder
 
-Flashback is a "replay buffer" for the 3DS top screen. While recording is on, it keeps the **last 10 seconds** of gameplay (adjustable from 5 to 30 seconds). When something worth keeping happens, press a button combo and those seconds are saved to the SD card as a video file.
+Flashback is a "replay buffer" for the 3DS top screen. While recording is on, it keeps the **last 10 seconds** of gameplay (adjustable from 10 seconds to a minute). When something worth keeping happens, press a button combo and those seconds are saved to the SD card as a video file.
 
 It is built into Rosalina, so it works in **any game**, including retail games, without plugins. It uses none of the game's memory and has no noticeable effect on game performance.
 
@@ -42,14 +42,14 @@ You can also save from the Flashback screen with <kbd>X</kbd>. Recording pauses 
 | <kbd>X</kbd> | Save a clip now |
 | <kbd>Y</kbd> | Resolution: half (200x120) or full (400x240) |
 | <kbd>Left</kbd>/<kbd>Right</kbd> | Frame rate: 10, 20 or 30 fps |
-| <kbd>L</kbd>/<kbd>R</kbd> | Clip length: 5 to 30 seconds, in 5-second steps |
+| <kbd>L</kbd>/<kbd>R</kbd> | Clip length: 10 to 60 seconds, in 10-second steps |
 | <kbd>Up</kbd>/<kbd>Down</kbd> | Save format: clip file (`.flb`) or BMP frames |
 | <kbd>Select</kbd> | Change the save hotkey |
 | <kbd>B</kbd> | Back |
 
 Turning recording off, or changing the resolution, frame rate or length, clears the buffer. Changing the save format doesn't. Opening a menu only pauses recording, so the buffer is kept.
 
-Saving a clip file (the default format) takes only a few seconds, however long the clip is: the buffer itself becomes the clip, and recording carries on with a new, empty buffer. That new buffer needs free space on the SD card, as much as a full clip (up to 173 MB at full resolution, 30 fps and 30 seconds); if there isn't enough, recording stops and the Flashback screen says the SD card is full. Saving as BMP frames is much slower, and recording is paused while it runs.
+Saving a clip file (the default format) takes only a few seconds, however long the clip is: the buffer itself becomes the clip, and recording carries on with a new, empty buffer. That new buffer needs free space on the SD card, as much as a full clip (up to about 346 MB at full resolution, 30 fps and 60 seconds); if there isn't enough, recording stops and the Flashback screen says the SD card is full. Saving as BMP frames is much slower, and recording is paused while it runs.
 
 The screen also shows live stats. **Rate** should stay close to the frame rate you picked. **Buffered** shows how many frames a save would contain right now, and how many of them are **dropped** frames: frames the recorder missed because it couldn't keep up, filled with a copy of the previous frame so clips still play at the right speed. If many frames are dropped, a lower resolution or frame rate will look smoother.
 
@@ -89,7 +89,7 @@ The buffer lives in `/luma/flashback/ring.bin` on the SD card, and recording wri
 | Half resolution, 10 fps | 4.8 MB | up to 4.8 MB | up to about 1.7 GB per hour |
 | Full resolution, 30 fps | 58 MB | up to 58 MB | up to about 21 GB per hour, typically around half that |
 
-A saved clip is the buffer file itself, so it's the same size (smaller if you save before the buffer has filled up). Sizes scale with the length: a 30-second buffer and clip are 3 times the sizes above. A good-quality SD card handles this easily, but continuous writing does add wear, especially at full resolution and 30 fps. Turn recording off when you don't need it.
+A saved clip is the buffer file itself, so it's the same size (smaller if you save before the buffer has filled up). Sizes scale with the length: a 60-second buffer and clip are 6 times the sizes above. A good-quality SD card handles this easily, but continuous writing does add wear, especially at full resolution and 30 fps. Turn recording off when you don't need it.
 
 ### Limitations
 

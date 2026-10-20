@@ -30,9 +30,10 @@
 // read straight from the display hardware's current framebuffer (like the
 // screenshot feature), converted to RGB565 at half (200x120) or full (400x240)
 // resolution at 10, 20 or 30 fps, compressed losslessly, and written to a ring
-// file on the SD card holding the last 5 to 30 seconds. Saving writes the
-// clip uncompressed, as one raw video file (/luma/flashback/clip_<date>.raw,
-// with a .txt describing it) or as numbered BMPs in /luma/flashback/clip_<date>/.
+// file on the SD card holding the last 10 to 60 seconds. Saving turns that ring
+// file into the clip (/luma/flashback/clip_<date>.flb, decoded on a PC by
+// Flashback-Studio's convert_flashback.bat) and starts a new one, or writes the
+// clip as numbered BMPs in /luma/flashback/clip_<date>/.
 //
 // Uncompressed, a second of footage is 1.4 MB at half resolution and 30 fps,
 // and 5.8 MB at full resolution and 30 fps (the ring file is sized for that).

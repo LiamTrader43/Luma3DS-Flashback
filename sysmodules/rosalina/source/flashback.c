@@ -84,10 +84,10 @@ static const u32 g_fpsChoices[] = { 10, 20, 30 };
 #define FLASHBACK_FPS_CHOICES   (sizeof(g_fpsChoices) / sizeof(g_fpsChoices[0]))
 
 // Clip length in seconds (how much the ring buffer holds).
-static const u32 g_lengthChoices[] = { 5, 10, 15, 20, 25, 30 };
+static const u32 g_lengthChoices[] = { 10, 20, 30, 40, 50, 60 };
 #define FLASHBACK_LENGTH_CHOICES (sizeof(g_lengthChoices) / sizeof(g_lengthChoices[0]))
-#define FLASHBACK_DEFAULT_LENGTH_IDX 1      // 10 seconds
-#define FLASHBACK_MAX_FRAMES    (30 * 30)   // longest length at the highest frame rate
+#define FLASHBACK_DEFAULT_LENGTH_IDX 0      // 10 seconds
+#define FLASHBACK_MAX_FRAMES    (60 * 30)   // longest length at the highest frame rate
 
 static MyThread flashbackThread;
 static u8 CTR_ALIGN(8) flashbackThreadStack[0x2000];
@@ -1163,7 +1163,10 @@ static s32 flashbackSave(void)
 
 #define FLASHBACK_SETTINGS_FILE     FLASHBACK_DIR "/settings.bin"
 #define FLASHBACK_SETTINGS_MAGIC    0x54534246  // "FBST"
-#define FLASHBACK_SETTINGS_VERSION  2   // 2: added lenIdx (version 1 files still load)
+// Version 2 added the clip length, as an index into the 5 to 30 second list of
+// that time; version 3 stores it in seconds, so the list can change. Older
+// files still load.
+#define FLASHBACK_SETTINGS_VERSION  3
 
 typedef struct FlashbackSettings {
     u32 magic;
@@ -1174,10 +1177,19 @@ typedef struct FlashbackSettings {
     u8  fpsIdx;         // index into g_fpsChoices
     u8  format;         // FlashbackFormat
     u32 saveCombo;
-    // Version 2:
-    u8  lenIdx;         // index into g_lengthChoices
+    // Version 2 and later:
+    u8  length;         // clip length in seconds (version 2: index into { 5, 10, ..., 30 })
     u8  reserved[3];
 } FlashbackSettings;
+
+// The shortest available length that's at least 'seconds' (or the longest).
+static u32 flashbackLengthIdxFor(u32 seconds)
+{
+    for (u32 i = 0; i < FLASHBACK_LENGTH_CHOICES; i++)
+        if (g_lengthChoices[i] >= seconds)
+            return i;
+    return FLASHBACK_LENGTH_CHOICES - 1;
+}
 
 #define FLASHBACK_SETTINGS_V1_SIZE  16  // everything up to and including saveCombo
 
@@ -1195,7 +1207,7 @@ static FlashbackSettings flashbackCurrentSettings(void)
     s.fpsIdx = (u8)g_wantFpsIdx;
     s.format = (u8)g_saveFormat;
     s.saveCombo = g_saveCombo;
-    s.lenIdx = (u8)g_wantLenIdx;
+    s.length = (u8)g_lengthChoices[g_wantLenIdx];
     return s;
 }
 
@@ -1230,9 +1242,11 @@ static void flashbackLoadSettings(void)
         s.version < 1 || s.version > FLASHBACK_SETTINGS_VERSION)
         return;
 
-    // Version 1 files end before lenIdx: the length keeps its default.
-    if (s.version >= 2 && total >= sizeof(s) && s.lenIdx < FLASHBACK_LENGTH_CHOICES)
-        g_wantLenIdx = s.lenIdx;
+    // Version 1 files end before the length: it keeps its default.
+    if (s.version == 2 && total >= sizeof(s) && s.length < 6)
+        g_wantLenIdx = flashbackLengthIdxFor((s.length + 1) * 5);   // 5..30 s, rounded up
+    else if (s.version >= 3 && total >= sizeof(s) && s.length != 0)
+        g_wantLenIdx = flashbackLengthIdxFor(s.length);
     if (s.res < FLASHBACK_RES_COUNT)
         g_wantRes = s.res;
     if (s.fpsIdx < FLASHBACK_FPS_CHOICES)
@@ -1634,7 +1648,19 @@ void FlashbackMenu_Show(void)
         posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Recording:  %s\n", g_enabled ? "on" : "off");
         posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Resolution: %s\n",
                                         res == FLASHBACK_RES_FULL ? "full (400x240)" : "half (200x120)");
-        posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Frame rate: %lu fps   Length: %lu s\n", fps, seconds);
+        // Size of a saved clip of the full length: a .flb is the ring file
+        // (frames rounded up to whole SD sectors), BMPs are frames plus headers.
+        u32 frameBytes = (res == FLASHBACK_RES_FULL ? 400 * 240 : 200 * 120) * 2;
+        u32 perFrame = g_saveFormat == FLASHBACK_FORMAT_RAW ? (frameBytes + 511) & ~511 : frameBytes + FLASHBACK_BMP_HEADER;
+        u64 clipBytes = (u64)frames * perFrame;
+        u32 clipTenthsMb = (u32)((clipBytes + 50000) / 100000);     // in tenths of a MB (1 MB = 1,000,000 bytes)
+
+        if (clipTenthsMb < 100)
+            posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Frame rate: %lu fps   Length: %lu s (%lu.%lu MB)\n",
+                                            fps, seconds, clipTenthsMb / 10, clipTenthsMb % 10);
+        else
+            posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Frame rate: %lu fps   Length: %lu s (%lu MB)\n",
+                                            fps, seconds, (clipTenthsMb + 5) / 10);
         posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Format:     %s\n\n",
                                         g_saveFormat == FLASHBACK_FORMAT_RAW ? "clip file (.flb, fast)" : "BMP frames (slow)");
 
@@ -1706,9 +1732,9 @@ void FlashbackMenu_Show(void)
         else if ((pressed & (KEY_DUP | KEY_DDOWN)) && !busy)
             g_saveFormat = (g_saveFormat + 1) % FLASHBACK_FORMAT_COUNT;
         else if ((pressed & KEY_R) && !busy && g_wantLenIdx + 1 < FLASHBACK_LENGTH_CHOICES)
-            g_wantLenIdx = g_wantLenIdx + 1;    // longer (stops at 30 s)
+            g_wantLenIdx = g_wantLenIdx + 1;    // longer (stops at the longest)
         else if ((pressed & KEY_L) && !busy && g_wantLenIdx > 0)
-            g_wantLenIdx = g_wantLenIdx - 1;    // shorter (stops at 5 s)
+            g_wantLenIdx = g_wantLenIdx - 1;    // shorter (stops at the shortest)
         else if (pressed & KEY_SELECT)
             FlashbackMenu_ChangeHotkey();
         else if (pressed & KEY_B)
