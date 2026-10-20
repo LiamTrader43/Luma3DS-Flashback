@@ -50,6 +50,9 @@
 
 // FS priority for the ring file. Rosalina's FS session runs at real-time
 // priority; the ring file's constant writes must not get ahead of the game.
+// Measured on a New 3DS XL at full resolution / 30 fps: write time per frame
+// was the same at low and normal priority (~36 ms) and slightly worse at
+// real-time (~41 ms), so the lowest priority costs nothing.
 #define FLASHBACK_RING_FS_PRIORITY  8
 
 // Semi-transparent bottom screen tints used as feedback for the hotkey
@@ -109,6 +112,7 @@ static volatile u32 g_res = FLASHBACK_RES_FULL;
 static volatile u32 g_fpsIdx = 2;
 static u32 g_w, g_h, g_fps, g_frames;   // derived from g_res / g_fpsIdx
 static u32 g_slotBytes, g_bmpBytes, g_bmpOffset, g_memSize;
+static u32 g_slotStride;                // ring and staging slot size: g_slotBytes rounded up to whole SD sectors
 
 // Owned by the flashback thread.
 static bool  g_active;                  // memory allocated + ring file open
@@ -123,15 +127,55 @@ static volatile u32 g_count;            // valid ring slots
 // rather than writing duplicates, since a slow SD write is the usual cause.
 static u16   g_repeat[FLASHBACK_MAX_FRAMES];
 
+// Size of each ring slot's contents: the compressed frame, or g_slotBytes if
+// the frame was stored uncompressed (it wouldn't have gotten smaller).
+static u32   g_slotLen[FLASHBACK_MAX_FRAMES];
+
+// Frames waiting to be written to the ring file. The capture thread captures
+// and compresses frames into staging slots, and the writer thread writes them
+// out, so capturing the next frame overlaps with writing the previous ones.
+// On a New 3DS XL the SD path tops out around 5 MB/s, which is less than full
+// resolution at 30 fps needs uncompressed (5.8 MB/s); compression is what
+// closes that gap. (Batching several frames per SD request was tried and
+// didn't help: the time is in moving the bytes, not in each request.)
+//
+// The frame for ring slot r always goes to staging slot r % FLASHBACK_STAGE_SLOTS.
+#define FLASHBACK_STAGE_SLOTS   4
+_Static_assert((FLASHBACK_SECONDS * 10) % FLASHBACK_STAGE_SLOTS == 0 &&
+               (FLASHBACK_SECONDS * 20) % FLASHBACK_STAGE_SLOTS == 0 &&
+               (FLASHBACK_SECONDS * 30) % FLASHBACK_STAGE_SLOTS == 0,
+               "the staging slot count must divide every ring size");
+
+// g_stageProduced - g_stageConsumed frames are waiting, oldest first, starting
+// at staging slot g_stageConsumed % FLASHBACK_STAGE_SLOTS. Both counters only
+// ever increase; g_head is kept congruent to g_stageProduced modulo the slot
+// count (see flashbackStart).
+static u32 g_stageRingIdx[FLASHBACK_STAGE_SLOTS];  // ring slot of each staged frame
+static u32 g_stageLen[FLASHBACK_STAGE_SLOTS];      // bytes to write for each staged frame
+static volatile u32 g_stageProduced;    // frames staged (capture thread)
+static volatile u32 g_stageConsumed;    // frames written or given up on (writer thread)
+static volatile bool g_writeFailed;     // a ring write failed (writer -> capture thread)
+static LightEvent g_writeEvent;         // signaled when a frame is staged
+
+static MyThread flashbackWriterThread;
+static u8 CTR_ALIGN(8) flashbackWriterStack[0x1000];
+static bool g_writerRunning;            // false: frames are written inline by the capture thread
+
 // Performance stats shown in the menu, updated about once a second while recording.
 static volatile u32 g_statFpsX10;       // frames actually recorded per second, x10
 static volatile u32 g_statCaptureUs;    // average time to read + convert one frame
-static volatile u32 g_statWriteUs;      // average time to write one frame to the SD card
+static volatile u32 g_statCompressUs;   // average time to compress one frame
+static volatile u32 g_statSizePct;      // average compressed size, % of the uncompressed frame
+static volatile u32 g_statWriteUs;      // average SD write time per frame
 static volatile u32 g_lastSaveMs;       // duration of the last save
 static volatile u32 g_lastSaveExpected; // frames the last save should have written
+static const char *volatile g_recordError; // why recording switched itself off, or NULL
 
-static u64 g_winStart, g_winCaptureTicks, g_winWriteTicks;
-static u32 g_winFrames;
+// Written by the writer thread only, never reset (wrap-around safe deltas).
+static volatile u32 g_writeTotalUs, g_writeTotalFrames;
+
+static u64 g_winStart, g_winCaptureTicks, g_winCompressTicks, g_winPackedBytes;
+static u32 g_winFrames, g_winWriteUs0, g_winWriteFrames0;
 
 static void flashbackApplyFormat(u32 res, u32 fpsIdx)
 {
@@ -144,17 +188,26 @@ static void flashbackApplyFormat(u32 res, u32 fpsIdx)
     g_frames = FLASHBACK_SECONDS * g_fps;
 
     g_slotBytes = g_w * g_h * 2;
+    // Every ring slot starts on a 512-byte SD sector (half resolution frames,
+    // 48000 bytes, otherwise don't), so writes never need the card to read
+    // and rewrite a partially covered sector.
+    g_slotStride = (g_slotBytes + 511) & ~511;
     g_bmpBytes = FLASHBACK_BMP_HEADER + g_slotBytes;
-    g_bmpOffset = (g_slotBytes + 0xFFF) & ~0xFFF;
+    // Staging slots first, then a buffer that holds the frame being captured
+    // (before compression) while recording, or a BMP / decompression scratch
+    // area while saving; the two never overlap in time.
+    g_bmpOffset = (FLASHBACK_STAGE_SLOTS * g_slotStride + 0xFFF) & ~0xFFF;
     g_memSize = (g_bmpOffset + g_bmpBytes + 0xFFF) & ~0xFFF;
 }
 
 static void flashbackResetStats(void)
 {
-    g_statFpsX10 = g_statCaptureUs = g_statWriteUs = 0;
+    g_statFpsX10 = g_statCaptureUs = g_statCompressUs = g_statSizePct = g_statWriteUs = 0;
     g_winStart = svcGetSystemTick();
-    g_winCaptureTicks = g_winWriteTicks = 0;
+    g_winCaptureTicks = g_winCompressTicks = g_winPackedBytes = 0;
     g_winFrames = 0;
+    g_winWriteUs0 = g_writeTotalUs;
+    g_winWriteFrames0 = g_writeTotalFrames;
 }
 
 static void flashbackUpdateStats(void)
@@ -168,12 +221,189 @@ static void flashbackUpdateStats(void)
     if (g_winFrames != 0)
     {
         g_statCaptureUs = (u32)(g_winCaptureTicks * 1000000 / SYSCLOCK_ARM11 / g_winFrames);
-        g_statWriteUs = (u32)(g_winWriteTicks * 1000000 / SYSCLOCK_ARM11 / g_winFrames);
+        g_statCompressUs = (u32)(g_winCompressTicks * 1000000 / SYSCLOCK_ARM11 / g_winFrames);
+        g_statSizePct = (u32)(g_winPackedBytes * 100 / ((u64)g_winFrames * g_slotBytes));
     }
 
+    u32 writeUs = g_writeTotalUs, writeFrames = g_writeTotalFrames;
+    if (writeFrames != g_winWriteFrames0)
+        g_statWriteUs = (writeUs - g_winWriteUs0) / (writeFrames - g_winWriteFrames0);
+
     g_winStart = now;
-    g_winCaptureTicks = g_winWriteTicks = 0;
+    g_winCaptureTicks = g_winCompressTicks = g_winPackedBytes = 0;
     g_winFrames = 0;
+    g_winWriteUs0 = writeUs;
+    g_winWriteFrames0 = writeFrames;
+}
+
+// ---------------------------------------------------------------------------
+// Lossless frame compression
+// ---------------------------------------------------------------------------
+//
+// A QOI-style ("Quite OK Image") byte format for RGB565 pixels, chosen for
+// speed: one pass, no tables beyond 64 recent colors, and frames from games
+// (flat areas, HUDs, smooth shading) shrink a lot. Each op, by its first byte:
+//   00iiiiii           INDEX  the color in slot i of the recently-seen table
+//   01rrggbb           DIFF   r/g/b each differ from the previous pixel by -2..1
+//   10gggggg rrrrbbbb  LUMA   g differs by -32..31, r and b by g/2 plus -8..7
+//   11rrrrrr           RUN    the previous pixel repeated 1..62 times (r = n - 1)
+//   11111110 lo hi     RAW    a full 16-bit pixel
+// Differences wrap around within each channel (5 bits for r and b, 6 for g).
+// The previous pixel starts as 0 and the table as all 0, for each frame.
+
+#define FLASHBACK_PACK_RUN_MAX  62
+#define FLASHBACK_PACK_RAW      0xFE
+
+static inline u32 flashbackPackHash(u16 px)
+{
+    return ((u32)px * 0x9E3779B1u) >> 26;   // 6 bits
+}
+
+// Wraps a channel difference into the signed range of a 'bits'-wide channel.
+static inline s32 flashbackPackWrap(s32 d, u32 bits)
+{
+    d &= (1 << bits) - 1;
+    return d >= (1 << (bits - 1)) ? d - (1 << bits) : d;
+}
+
+// Compresses 'pixels' RGB565 pixels into 'dst'. Returns the compressed size,
+// or 0 if it wouldn't be smaller than 'cap' bytes (store the frame as is).
+static u32 flashbackCompress(const u16 *src, u32 pixels, u8 *dst, u32 cap)
+{
+    u16 index[64];
+    memset(index, 0, sizeof(index));
+    u16 prev = 0;
+    u32 run = 0;
+    u8 *out = dst;
+    const u8 *limit = dst + cap - 4;    // room for a run flush plus the largest op
+
+    for (u32 i = 0; i < pixels; i++)
+    {
+        u16 px = src[i];
+        if (px == prev)
+        {
+            if (++run == FLASHBACK_PACK_RUN_MAX)
+            {
+                if (out > limit)
+                    return 0;
+                *out++ = 0xC0 | (FLASHBACK_PACK_RUN_MAX - 1);
+                run = 0;
+            }
+            continue;
+        }
+
+        if (out > limit)
+            return 0;
+        if (run != 0)
+        {
+            *out++ = 0xC0 | (run - 1);
+            run = 0;
+        }
+
+        u32 h = flashbackPackHash(px);
+        if (index[h] == px)
+            *out++ = (u8)h;
+        else
+        {
+            index[h] = px;
+            s32 dr = flashbackPackWrap((s32)(px >> 11) - (s32)(prev >> 11), 5);
+            s32 dg = flashbackPackWrap((s32)((px >> 5) & 0x3F) - (s32)((prev >> 5) & 0x3F), 6);
+            s32 db = flashbackPackWrap((s32)(px & 0x1F) - (s32)(prev & 0x1F), 5);
+            s32 tr = dr - (dg >> 1), tb = db - (dg >> 1);
+
+            if (dr >= -2 && dr <= 1 && dg >= -2 && dg <= 1 && db >= -2 && db <= 1)
+                *out++ = 0x40 | ((dr + 2) << 4) | ((dg + 2) << 2) | (db + 2);
+            else if (tr >= -8 && tr <= 7 && tb >= -8 && tb <= 7)
+            {
+                *out++ = 0x80 | (dg + 32);
+                *out++ = ((tr + 8) << 4) | (tb + 8);
+            }
+            else
+            {
+                *out++ = FLASHBACK_PACK_RAW;
+                *out++ = (u8)px;
+                *out++ = (u8)(px >> 8);
+            }
+        }
+        prev = px;
+    }
+
+    if (run != 0)
+    {
+        if (out > limit)
+            return 0;
+        *out++ = 0xC0 | (run - 1);
+    }
+    return (u32)(out - dst);
+}
+
+// Decompresses exactly 'pixels' pixels from exactly 'len' bytes. Returns false
+// if the data is malformed (never writes past 'dst' + 'pixels').
+static bool flashbackDecompress(const u8 *src, u32 len, u16 *dst, u32 pixels)
+{
+    u16 index[64];
+    memset(index, 0, sizeof(index));
+    u16 px = 0;
+    const u8 *p = src, *end = src + len;
+    u32 i = 0;
+
+    while (i < pixels)
+    {
+        if (p >= end)
+            return false;
+        u8 b = *p++;
+
+        if (b == FLASHBACK_PACK_RAW)
+        {
+            if (end - p < 2)
+                return false;
+            px = p[0] | (p[1] << 8);
+            p += 2;
+        }
+        else if ((b & 0xC0) == 0xC0)
+        {
+            u32 run = (b & 0x3F) + 1;
+            if (run > pixels - i)
+                return false;
+            while (run-- != 0)
+                dst[i++] = px;
+            continue;
+        }
+        else if ((b & 0xC0) == 0x00)
+        {
+            px = index[b];
+            dst[i++] = px;
+            continue;
+        }
+        else
+        {
+            s32 dr, dg, db;
+            if ((b & 0xC0) == 0x40)
+            {
+                dr = ((b >> 4) & 3) - 2;
+                dg = ((b >> 2) & 3) - 2;
+                db = (b & 3) - 2;
+            }
+            else
+            {
+                if (p >= end)
+                    return false;
+                u8 b2 = *p++;
+                dg = (b & 0x3F) - 32;
+                dr = ((b2 >> 4) - 8) + (dg >> 1);
+                db = ((b2 & 0xF) - 8) + (dg >> 1);
+            }
+            u32 r = ((px >> 11) + dr) & 0x1F;
+            u32 g = (((px >> 5) & 0x3F) + dg) & 0x3F;
+            u32 bl = ((px & 0x1F) + db) & 0x1F;
+            px = (u16)((r << 11) | (g << 5) | bl);
+        }
+
+        index[flashbackPackHash(px)] = px;
+        dst[i++] = px;
+    }
+
+    return p == end;
 }
 
 static bool flashbackIsSdMode(void)
@@ -191,12 +421,13 @@ typedef struct FlashbackCaptureArgs {
     u16 *dst;
     u32 outW, outH;
     u32 kernPaToVa;
+    u32 flushedPa;  // framebuffer whose cache lines were flushed for this attempt
     bool ok;
-    bool torn;      // the displayed buffer changed while we were reading it
+    bool torn;      // the displayed buffer changed before or while we were reading it
 } FlashbackCaptureArgs;
 
-// Retries for a torn frame. Each attempt flushes the caches first, so a retry
-// never reads lines cached by the previous attempt.
+// Retries for a torn frame. Each attempt flushes the framebuffer first, so a
+// retry never reads lines cached by the previous attempt.
 #define FLASHBACK_CAPTURE_ATTEMPTS  3
 
 static inline u16 flashbackRgb565(u32 r, u32 g, u32 b)
@@ -209,7 +440,12 @@ static inline u16 flashbackPixelToRgb565(const u8 *src, u32 fmt)
     switch (fmt)
     {
         case GSP_RGBA8_OES:     // bytes in memory: A, B, G, R
-            return flashbackRgb565(src[3], src[2], src[1]);
+        {
+            // One aligned 32-bit read instead of three byte reads (like
+            // Draw_ConvertPixelToBGR8). 4-byte pixels are always aligned.
+            u32 px = *(const u32 *)src;
+            return flashbackRgb565(px >> 24, (px >> 16) & 0xFF, (px >> 8) & 0xFF);
+        }
         case GSP_BGR8_OES:      // bytes in memory: B, G, R
             return flashbackRgb565(src[2], src[1], src[0]);
         case GSP_RGB565_OES:
@@ -276,6 +512,14 @@ static void flashbackCaptureKernel(FlashbackCaptureArgs *args)
     if (bpp == 0 || pa == 0 || stride == 0)
         return;
 
+    // Only the buffer flushed just before this call is safe to read: if the
+    // game swapped since, the other buffer may still have stale cache lines.
+    if (pa != args->flushedPa)
+    {
+        args->torn = true;  // nothing read (ok stays false); the caller retries with a fresh flush
+        return;
+    }
+
     // 800px mode (2D, half-width pixels) has twice the columns.
     bool is3d = (fmtReg & BIT(5)) != 0;
     bool isNormal2d = (fmtReg & BIT(6)) != 0;
@@ -301,21 +545,51 @@ static void flashbackCaptureKernel(FlashbackCaptureArgs *args)
     args->ok = true;
 }
 
+// Flushes (cleans + invalidates) the CPU cache lines of the framebuffer that's
+// on screen right now, and returns its physical address (0 if there is none).
+// The GPU writes the framebuffer behind the caches' back, so lines cached by the
+// previous capture would otherwise be read back stale. This used to flush the
+// entire data cache, which on every frame also interrupted the game's core and
+// threw away its cached data (and all of the New 3DS's L2). It's the same kernel
+// routine (svcFlushEntireDataCache passes it an "everything" range), just
+// limited to the framebuffer.
+static u32 flashbackFlushFramebuffer(u32 kernPaToVa)
+{
+    static const u8 formatSizes[8] = { 4, 3, 2, 2, 2, 0, 0, 0 };
+
+    u32 fmtReg = GPU_FB_TOP_FMT;
+    u32 pa = flashbackCurrentTopFramebuffer();
+    u32 stride = GPU_FB_TOP_STRIDE;
+    if (formatSizes[fmtReg & 7] == 0 || pa == 0 || stride == 0)
+        return 0;
+
+    bool is3d = (fmtReg & BIT(5)) != 0;
+    bool isNormal2d = (fmtReg & BIT(6)) != 0;
+    u32 columns = !is3d && !isNormal2d ? 800 : 400;
+
+    svcFlushDataCacheRange((void *)(pa + kernPaToVa), columns * stride);
+    return pa;
+}
+
 static bool flashbackCapture(u16 *dst)
 {
-    FlashbackCaptureArgs args = { dst, g_w, g_h, KERNPA2VA_OFFSET(), false, false };
+    FlashbackCaptureArgs args = { dst, g_w, g_h, KERNPA2VA_OFFSET(), 0, false, false };
 
     for (u32 attempt = 0; attempt < FLASHBACK_CAPTURE_ATTEMPTS; attempt++)
     {
-        // The GPU wrote the framebuffer behind the CPU caches' back.
-        svcFlushEntireDataCache();
+        args.flushedPa = flashbackFlushFramebuffer(args.kernPaToVa);
+        if (args.flushedPa == 0)
+            return false;   // no valid framebuffer right now
         svcCustomBackdoor(flashbackCaptureKernel, &args);
-        if (!args.ok || !args.torn)
-            break;
+        if (!args.torn)
+            break;          // a clean frame, or no valid framebuffer
     }
 
-    // A frame still torn after every attempt is kept: the game is swapping
-    // faster than we can read, and a slightly torn frame beats a missing one.
+    // Still torn after every attempt: the game is swapping faster than we can
+    // read. A frame torn mid-read (ok) is kept, since a slightly torn frame beats
+    // a missing one. If the last attempt couldn't read at all (the buffer changed
+    // right after the flush, !ok), the frame counts as missed and is filled with
+    // a copy of the previous one.
     return args.ok;
 }
 
@@ -327,6 +601,75 @@ static Result flashbackCreateDirectory(FS_Archive archive, const char *path)
 {
     Result res = FSUSER_CreateDirectory(archive, fsMakePath(PATH_ASCII, path), 0);
     return (u32)res == 0xC82044BE ? 0 : res; // already exists
+}
+
+// Writes every staged frame to its ring slot, oldest first. Only the frame's
+// (compressed) bytes are written, rounded up to whole SD sectors so the card
+// never has to read back a partially covered one. Runs on the writer thread,
+// or inline on the capture thread if the writer couldn't be started.
+static void flashbackWritePending(void)
+{
+    for (;;)
+    {
+        u32 consumed = g_stageConsumed;
+        if (g_stageProduced == consumed)
+            return;
+        __sync_synchronize();   // see the staged frame, its ring slot and size before using them
+
+        u32 slot = consumed % FLASHBACK_STAGE_SLOTS;
+
+        // After a failure, frames are only discarded, so the capture thread
+        // can stop recording without waiting on a broken card.
+        if (!g_writeFailed)
+        {
+            u64 total;
+            u32 len = (g_stageLen[slot] + 511) & ~511;
+            if (len > g_slotStride)
+                len = g_slotStride;
+            u64 t0 = svcGetSystemTick();
+
+            g_ring.pos = (u64)g_stageRingIdx[slot] * g_slotStride;   // pre-sized file: always an overwrite
+            if (R_FAILED(IFile_Write(&g_ring, &total, g_mem + slot * g_slotStride, len, 0)) || total != len)
+                g_writeFailed = true;
+            else
+            {
+                g_writeTotalUs += (u32)((svcGetSystemTick() - t0) * 1000000 / SYSCLOCK_ARM11);
+                g_writeTotalFrames++;
+            }
+        }
+
+        __sync_synchronize();   // finish with the slot before handing it back
+        g_stageConsumed = consumed + 1;
+    }
+}
+
+static void flashbackWriterThreadMain(void)
+{
+    // Keep going after termination is requested until everything staged is
+    // written; the capture thread waits for that before closing the ring file.
+    while (!preTerminationRequested || g_stageProduced != g_stageConsumed)
+    {
+        LightEvent_WaitTimeout(&g_writeEvent, 100 * 1000 * 1000LL);
+        flashbackWritePending();
+    }
+}
+
+// Waits until every staged frame has been written, so the ring file and the
+// staging slots can be used or freed by the capture thread.
+static void flashbackDrainWrites(void)
+{
+    if (!g_writerRunning)
+    {
+        flashbackWritePending();
+        return;
+    }
+
+    while (g_stageProduced != g_stageConsumed)
+    {
+        LightEvent_Signal(&g_writeEvent);
+        svcSleepThread(1 * 1000 * 1000LL);
+    }
+    __sync_synchronize();
 }
 
 static Result flashbackStart(void)
@@ -353,7 +696,7 @@ static Result flashbackStart(void)
             // Allocate the whole ring up front, so SD space is claimed now
             // rather than during gameplay, and a full card fails here instead
             // of mid-recording. Old contents don't matter: g_count starts at 0.
-            res = IFile_SetSize(&g_ring, (u64)g_frames * g_slotBytes);
+            res = IFile_SetSize(&g_ring, (u64)g_frames * g_slotStride);
             if (R_SUCCEEDED(res))
                 FSFILE_SetPriority(g_ring.handle, FLASHBACK_RING_FS_PRIORITY);
             else
@@ -369,9 +712,13 @@ static Result flashbackStart(void)
         return res;
     }
 
-    g_head = 0;
+    // The ring can start at any slot. Starting at the one matching the staging
+    // counter keeps ring slot r in staging slot r % FLASHBACK_STAGE_SLOTS
+    // (nothing is staged here, so the counters can't change under us).
+    g_head = g_stageProduced % FLASHBACK_STAGE_SLOTS;
     g_count = 0;
     memset(g_repeat, 0, sizeof(g_repeat));
+    g_writeFailed = false;
     g_active = true;
     flashbackResetStats();
     return 0;
@@ -383,6 +730,7 @@ static void flashbackStop(void)
     if (!g_active)
         return;
 
+    flashbackDrainWrites();     // the writer must be done with the file and slots
     IFile_Close(&g_ring);
     svcControlMemory(&tmp, FLASHBACK_MEM_ADDR, 0, g_memSize, MEMOP_FREE, 0);
     g_mem = NULL;
@@ -390,29 +738,52 @@ static void flashbackStop(void)
     g_count = 0;
 }
 
-// Returns false if no frame was recorded this tick.
+// Captures and compresses a frame into the next staging slot and hands it to
+// the writer. Returns false if no frame was recorded this tick (capture failed,
+// or every staging slot is still waiting to be written because the SD card is
+// behind).
 static bool flashbackRecordFrame(void)
 {
-    u64 total;
-    u16 *frame = (u16 *)g_mem;
+    if (g_stageProduced - g_stageConsumed >= FLASHBACK_STAGE_SLOTS)
+        return false;
+
+    u32 slot = g_head % FLASHBACK_STAGE_SLOTS;  // == g_stageProduced % FLASHBACK_STAGE_SLOTS
+    u8 *stage = g_mem + slot * g_slotStride;
+    u16 *frame = (u16 *)(g_mem + g_bmpOffset);  // capture buffer (only saves use it otherwise)
 
     u64 t0 = svcGetSystemTick();
     if (!flashbackCapture(frame))
         return false;
     u64 t1 = svcGetSystemTick();
 
-    g_ring.pos = (u64)g_head * g_slotBytes; // the file is pre-sized, so this is always an overwrite
-    if (R_FAILED(IFile_Write(&g_ring, &total, frame, g_slotBytes, 0)) || total != g_slotBytes)
-        return false;
+    // Frames that wouldn't get smaller are stored as they are.
+    u32 len = flashbackCompress(frame, g_w * g_h, stage, g_slotBytes);
+    if (len == 0 || len >= g_slotBytes)
+    {
+        memcpy(stage, frame, g_slotBytes);
+        len = g_slotBytes;
+    }
 
     g_winCaptureTicks += t1 - t0;
-    g_winWriteTicks += svcGetSystemTick() - t1;
+    g_winCompressTicks += svcGetSystemTick() - t1;
+    g_winPackedBytes += len;
     g_winFrames++;
 
     g_repeat[g_head] = 0;
+    g_slotLen[g_head] = len;
+    g_stageRingIdx[slot] = g_head;
+    g_stageLen[slot] = len;
+    __sync_synchronize();   // frame, ring slot and size must be visible before the frame is handed over
+    g_stageProduced++;
+
     g_head = (g_head + 1) % g_frames;
     if (g_count < g_frames)
         g_count++;
+
+    if (g_writerRunning)
+        LightEvent_Signal(&g_writeEvent);
+    else
+        flashbackWritePending();
     return true;
 }
 
@@ -501,13 +872,28 @@ static inline u32 flashbackPlanSlot(const FlashbackClipPlan *plan, u32 i, u32 *c
     return idx;
 }
 
-// Reads 'count' ring slots starting at 'idx' (which must not wrap) in one request.
+// Reads 'count' ring slots starting at 'idx' (which must not wrap) as
+// uncompressed frames, g_slotBytes apart, into 'dst'. Only each slot's actual
+// contents are read; compressed ones go through the scratch buffer (free while
+// saving) and are decompressed into place.
 static bool flashbackReadSlots(u32 idx, u32 count, u8 *dst)
 {
-    u64 total;
-    u32 len = count * g_slotBytes;
-    g_ring.pos = (u64)idx * g_slotBytes;
-    return R_SUCCEEDED(IFile_Read(&g_ring, &total, dst, len)) && total == len;
+    u8 *scratch = g_mem + g_bmpOffset;
+
+    for (u32 i = 0; i < count; i++)
+    {
+        u64 total;
+        u32 len = g_slotLen[idx + i];
+        u8 *frame = dst + i * g_slotBytes;
+        bool packed = len < g_slotBytes;
+
+        g_ring.pos = (u64)(idx + i) * g_slotStride;
+        if (R_FAILED(IFile_Read(&g_ring, &total, packed ? scratch : frame, len)) || total != len)
+            return false;
+        if (packed && !flashbackDecompress(scratch, len, (u16 *)frame, g_w * g_h))
+            return false;
+    }
+    return true;
 }
 
 // How many plan slots starting at 'i' sit next to each other in the ring file
@@ -530,15 +916,19 @@ static u32 flashbackContiguousSlots(const FlashbackClipPlan *plan, u32 i, u32 ma
 typedef struct FlashbackSaveBuffer {
     u8 *data;
     u32 frames;     // capacity in frames
-    u32 allocSize;  // 0 if we fell back to the recorder's own one-frame buffer
+    u32 allocSize;  // 0 if we're using the recorder's own staging slots
 } FlashbackSaveBuffer;
 
+// Needs the staging slots to be idle (flashbackDrainWrites), which they are
+// during a save. A separate buffer is only borrowed when it's meaningfully
+// bigger than the staging slots (at half resolution); at full resolution the
+// staging slots are used directly, keeping peak memory use down.
 static FlashbackSaveBuffer flashbackAllocSaveBuffer(void)
 {
-    FlashbackSaveBuffer buf = { g_mem, 1, 0 };
+    FlashbackSaveBuffer buf = { g_mem, FLASHBACK_STAGE_SLOTS, 0 };
     u32 tmp;
 
-    for (u32 frames = FLASHBACK_SAVE_BUF_MAX / g_slotBytes; frames > 1; frames /= 2)
+    for (u32 frames = FLASHBACK_SAVE_BUF_MAX / g_slotBytes; frames > 2 * FLASHBACK_STAGE_SLOTS; frames /= 2)
     {
         u32 size = (frames * g_slotBytes + 0xFFF) & ~0xFFF;
         if (R_SUCCEEDED(svcControlMemoryEx(&tmp, FLASHBACK_SAVE_BUF_ADDR, 0, size,
@@ -784,6 +1174,10 @@ static s32 flashbackSave(void)
 {
     if (!g_active || g_count == 0)
         return -1;
+
+    // Frames still waiting to be written belong at the end of the clip, and
+    // the save reads the ring file and reuses the staging slots.
+    flashbackDrainWrites();
 
     FS_Archive archive;
     if (R_FAILED(FSUSER_OpenArchive(&archive, ARCHIVE_SDMC, fsMakePath(PATH_EMPTY, ""))))
@@ -1077,7 +1471,10 @@ static void flashbackThreadMain(void)
         }
 
         if (g_enabled && !g_active && sdMode && R_FAILED(flashbackStart()))
+        {
             g_enabled = false;
+            g_recordError = "Couldn't start: not enough memory or SD space.";
+        }
 
         // menuShouldExit: going to sleep / shell closed / terminating.
         // menuIsOpen: the game is paused under a Rosalina menu, so recording
@@ -1093,6 +1490,17 @@ static void flashbackThreadMain(void)
             flashbackUpdateStats();
         }
         wasRecording = recording;
+
+        // A ring write failed (card removed or broken): frames already marked
+        // as recorded may be missing from the file, so drop the buffer rather
+        // than risk saving stale frames, and stop.
+        if (g_writeFailed && g_active)
+        {
+            flashbackStop();
+            g_enabled = false;
+            g_recordError = "SD card write failed: recording stopped.";
+            wasRecording = false;
+        }
 
         // Frames sit on a fixed time grid (one slot every 'period'). Every
         // grid slot is either recorded or filled with a duplicate, so clips
@@ -1114,13 +1522,30 @@ static void flashbackThreadMain(void)
             nextTick = now;
     }
 
-    flashbackStop();
+    flashbackStop();    // waits for the writer to finish first
+
+    if (g_writerRunning)
+    {
+        LightEvent_Signal(&g_writeEvent);
+        MyThread_Join(&flashbackWriterThread, -1LL);
+    }
 }
 
 MyThread *flashbackCreateThread(void)
 {
-    // Lowest priority of Rosalina's threads, on the system core. Unlike the
-    // core threads, failing to start is not fatal: the recorder just stays off.
+    LightEvent_Init(&g_writeEvent, RESET_ONESHOT);
+
+    // Both threads have the lowest priorities among Rosalina's threads and run
+    // on the system core. The writer is one step *above* the capture thread:
+    // it hardly uses the CPU (it mostly waits on the SD card), and running
+    // first means it sends the next write the moment the previous one finishes.
+    // Below the capture thread, it had to wait out each frame's capture and
+    // compression (~15 ms) with the card idle; an SD speed test on a New 3DS XL
+    // put a ~100 KB write at ~20 ms, but recording measured 31-36 ms per write.
+    // Neither thread is essential to Rosalina: without the writer, frames are
+    // written inline, and without the capture thread the recorder stays off.
+    g_writerRunning = R_SUCCEEDED(MyThread_Create(&flashbackWriterThread, flashbackWriterThreadMain, flashbackWriterStack,
+                                                  sizeof(flashbackWriterStack), 59, CORE_SYSTEM));
     g_threadRunning = R_SUCCEEDED(MyThread_Create(&flashbackThread, flashbackThreadMain, flashbackThreadStack,
                                                   sizeof(flashbackThreadStack), 60, CORE_SYSTEM));
     return g_threadRunning ? &flashbackThread : NULL;
@@ -1258,13 +1683,18 @@ void FlashbackMenu_Show(void)
                                         buffered, frames, dropped);
         posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Rate:      %lu.%lu / %lu fps\n",
                                         g_statFpsX10 / 10, g_statFpsX10 % 10, fps);
-        posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Per frame: capture %lu.%lums, write %lu.%lums\n",
+        posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Per frame: capture %lu.%lu, compress %lu.%lu, write %lu.%lums\n",
                                         g_statCaptureUs / 1000, (g_statCaptureUs / 100) % 10,
+                                        g_statCompressUs / 1000, (g_statCompressUs / 100) % 10,
                                         g_statWriteUs / 1000, (g_statWriteUs / 100) % 10);
-        posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Budget:    %lums per frame\n\n", 1000 / fps);
+        posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Budget:    %lums per frame, compressed to %lu%%\n\n",
+                                        1000 / fps, g_statSizePct);
 
+        const char *recordError = g_recordError;
         if (g_saving || g_saveRequested)
             posY = Draw_DrawString(10, posY, COLOR_WHITE, "Saving...\n");
+        else if (recordError != NULL)
+            posY = Draw_DrawFormattedString(10, posY, COLOR_RED, "%s\n", recordError);
         else if (g_lastSaveResult > 0 && (u32)g_lastSaveResult < g_lastSaveExpected)
             posY = Draw_DrawFormattedString(10, posY, COLOR_RED, "Incomplete: saved %ld of %lu frames to\n%s\n",
                                             g_lastSaveResult, g_lastSaveExpected, g_lastClip);
@@ -1289,7 +1719,10 @@ void FlashbackMenu_Show(void)
         bool busy = g_saving || g_saveRequested;
 
         if ((pressed & KEY_A) && sdMode && g_threadRunning)
+        {
             g_enabled = !g_enabled;
+            g_recordError = NULL;
+        }
         else if ((pressed & KEY_X) && !busy)
         {
             g_saveFromHotkey = false;
