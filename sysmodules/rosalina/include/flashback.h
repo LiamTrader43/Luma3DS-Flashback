@@ -39,6 +39,10 @@
 // and 5.8 MB at full resolution and 30 fps (the ring file is sized for that).
 // Frames the recorder misses (SD card or CPU too slow) are filled with copies
 // of the previous frame, so clips always play back at the right speed.
+//
+// The game's audio is recorded too (unless turned off): the DSP's final mix,
+// read from the memory it shares with the game, 131 KB per second, kept in an
+// audio ring at the start of the ring file and saved in the clip with the frames.
 
 #pragma once
 

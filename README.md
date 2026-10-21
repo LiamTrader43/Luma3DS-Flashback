@@ -12,7 +12,7 @@
 
 ## Flashback recorder
 
-Flashback is a "replay buffer" for the 3DS top screen. While recording is on, it keeps the **last 10 seconds** of gameplay (adjustable from 10 seconds to a minute). When something worth keeping happens, press a button combo and those seconds are saved to the SD card as a video file.
+Flashback is a "replay buffer" for the 3DS top screen. While recording is on, it keeps the **last 10 seconds** of gameplay, with sound (adjustable from 10 seconds to a minute). When something worth keeping happens, press a button combo and those seconds are saved to the SD card as a video file.
 
 It is built into Rosalina, so it works in **any game**, including retail games, without plugins. It uses none of the game's memory and has no noticeable effect on game performance.
 
@@ -44,14 +44,17 @@ You can also save from the Flashback screen with <kbd>X</kbd>. Recording pauses 
 | <kbd>Left</kbd>/<kbd>Right</kbd> | Frame rate: 10, 20 or 30 fps |
 | <kbd>L</kbd>/<kbd>R</kbd> | Clip length: 10 to 60 seconds, in 10-second steps |
 | <kbd>Up</kbd>/<kbd>Down</kbd> | Save format: clip file (`.flb`) or BMP frames |
+| <kbd>Start</kbd> | Audio: on or off |
 | <kbd>Select</kbd> | Change the save hotkey |
 | <kbd>B</kbd> | Back |
 
-Turning recording off, or changing the resolution, frame rate or length, clears the buffer. Changing the save format doesn't. Opening a menu only pauses recording, so the buffer is kept.
+Turning recording off, or changing the resolution, frame rate, length or audio, clears the buffer. Changing the save format doesn't. Opening a menu only pauses recording, so the buffer is kept.
 
-Saving a clip file (the default format) takes only a few seconds, however long the clip is: the buffer itself becomes the clip, and recording carries on with a new, empty buffer. That new buffer needs free space on the SD card, as much as a full clip (up to about 346 MB at full resolution, 30 fps and 60 seconds); if there isn't enough, recording stops and the Flashback screen says the SD card is full. Saving as BMP frames is much slower, and recording is paused while it runs.
+Saving a clip file (the default format) takes only a few seconds, however long the clip is: the buffer itself becomes the clip, and recording carries on with a new, empty buffer. That new buffer needs free space on the SD card, as much as a full clip (up to about 354 MB at full resolution, 30 fps and 60 seconds, with audio); if there isn't enough, recording stops and the Flashback screen says the SD card is full. Saving as BMP frames is much slower, and recording is paused while it runs.
 
-The screen also shows live stats. **Rate** should stay close to the frame rate you picked. **Buffered** shows how many frames a save would contain right now, and how many of them are **dropped** frames: frames the recorder missed because it couldn't keep up, filled with a copy of the previous frame so clips still play at the right speed. If many frames are dropped, a lower resolution or frame rate will look smoother.
+The screen also shows live stats. **Rate** should stay close to the frame rate you picked. **Buffered** shows how many frames a save would contain right now, and how many of them are **dropped** frames: frames the recorder missed because it couldn't keep up, filled with a copy of the previous frame so clips still play at the right speed. If many frames are dropped, a lower resolution or frame rate will look smoother. With audio on, **Rate** also shows how many bits of audio were **missed** (see below).
+
+**Audio.** Flashback records the game's sound with the picture: the final mix the 3DS's sound chip sends to the speakers, read from the memory it shares with the game. It's on by default; <kbd>Start</kbd> turns it off. It adds about 131 KB per second (8 MB for a minute) to the buffer and clips, and converted MP4s get it as an AAC track. If the recorder ever misses a moment of audio (5 ms at a time; it rarely does), that moment is silent in the clip and counted as **missed**.
 
 **Changing the save hotkey:** press <kbd>Select</kbd>, hold the new combination (at least 2 buttons), then let go. If the combination can't be used, press <kbd>A</kbd> to try again. Combos that overlap the Rosalina menu combo aren't allowed.
 
@@ -74,11 +77,13 @@ To convert clips (Windows):
 
 Each clip becomes an MP4 next to it, at twice the size with sharp pixels. It plays in any video player and imports into video editors like DaVinci Resolve. Clips that already have an MP4 are skipped, and a clip that was copied incompletely is reported instead of converted. Clips saved by older Flashback builds (`.raw` with a `.txt`) convert the same way.
 
-**BMP frames.** Each clip is a `clip_<date>/` folder of numbered images (`frame_000.bmp`, `frame_001.bmp`, ...) that you can open directly. To turn them into a video, run this in the clip folder, using the frame rate you recorded at:
+**BMP frames.** Each clip is a `clip_<date>/` folder of numbered images (`frame_000.bmp`, `frame_001.bmp`, ...) that you can open directly, plus `audio.wav` with the sound. To turn them into a video, run this in the clip folder, using the frame rate you recorded at:
 
 ```
-ffmpeg -framerate 30 -i frame_%03d.bmp -vf "scale=iw*2:ih*2:flags=neighbor" -c:v libx264 -crf 12 -pix_fmt yuv420p clip.mp4
+ffmpeg -framerate 30 -i frame_%03d.bmp -i audio.wav -vf "scale=iw*2:ih*2:flags=neighbor" -c:v libx264 -crf 12 -pix_fmt yuv420p -c:a aac -b:a 192k clip.mp4
 ```
+
+(Leave out `-i audio.wav` and `-c:a aac -b:a 192k` for clips recorded with audio off.)
 
 ### SD card usage
 
@@ -89,12 +94,13 @@ The buffer lives in `/luma/flashback/ring.bin` on the SD card, and recording wri
 | Half resolution, 10 fps | 4.8 MB | up to 4.8 MB | up to about 1.7 GB per hour |
 | Full resolution, 30 fps | 58 MB | up to 58 MB | up to about 21 GB per hour, typically around half that |
 
-A saved clip is the buffer file itself, so it's the same size (smaller if you save before the buffer has filled up). Sizes scale with the length: a 60-second buffer and clip are 6 times the sizes above. A good-quality SD card handles this easily, but continuous writing does add wear, especially at full resolution and 30 fps. Turn recording off when you don't need it.
+A saved clip is the buffer file itself, so it's the same size (smaller if you save before the buffer has filled up). Sizes scale with the length: a 60-second buffer and clip are 6 times the sizes above. Audio adds 1.6 MB to a 10-second buffer and clip (8 MB to a 60-second one), and about 0.5 GB per hour of writing. A good-quality SD card handles this easily, but continuous writing does add wear, especially at full resolution and 30 fps. Turn recording off when you don't need it.
 
 ### Limitations
 
-* **Recording is always off after a reboot**: turn it on from the Flashback screen each time. Your other settings (resolution, frame rate, length, format and hotkey) are remembered in `/luma/flashback/settings.bin` when you leave the Flashback screen. Delete that file to go back to the defaults: full resolution and 30 fps on New 3DS/2DS (half resolution and 30 fps on Old 3DS/2DS), 10 seconds, clip file format, hotkey <kbd>L+R+Down</kbd>.
-* **Only the top screen** is recorded, and only the left eye when 3D is on. There is no audio.
+* **Recording is always off after a reboot**: turn it on from the Flashback screen each time. Your other settings (resolution, frame rate, length, format and hotkey) are remembered in `/luma/flashback/settings.bin` when you leave the Flashback screen. Delete that file to go back to the defaults: full resolution and 30 fps on New 3DS/2DS (half resolution and 30 fps on Old 3DS/2DS), 10 seconds, clip file format, audio on, hotkey <kbd>L+R+Down</kbd>.
+* **Only the top screen** is recorded, and only the left eye when 3D is on.
+* **Audio is the game's, at full volume**: it's recorded before the volume slider, so clips have the same level however loud the 3DS is set. Sounds played through the 3DS's other sound hardware (CSND, used by a few games, some system sounds and older homebrew) aren't recorded.
 * **Converting clips needs Windows**: `convert_flashback.bat` uses PowerShell, which comes with Windows. There's no converter for macOS or Linux yet.
 * **SD card only**: Flashback is disabled when Luma3DS boots from the internal memory (NAND).
 * **Old 3DS/2DS are slower**: they have a much slower CPU, so higher settings can make games run slower. That's why they default to half resolution. If a game slows down, lower the resolution or frame rate.

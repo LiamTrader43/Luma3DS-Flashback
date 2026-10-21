@@ -138,6 +138,69 @@ static u16   g_repeat[FLASHBACK_MAX_FRAMES];
 // the frame was stored uncompressed (it wouldn't have gotten smaller).
 static u32   g_slotLen[FLASHBACK_MAX_FRAMES];
 
+// ---------------------------------------------------------------------------
+// Audio
+// ---------------------------------------------------------------------------
+//
+// The DSP mixes everything the game plays 160 samples at a time (an "audio
+// frame", ~4.9 ms at its 32728 Hz rate, SYSCLOCK_ARM11 / 8192) and leaves each
+// mix ("final mix samples": 160 stereo PCM16 samples, what the speakers get)
+// in one of the two shared memory regions it uses with the game, at physical
+// 0x1FF50000 and 0x1FF70000. The two take turns: once the DSP has written a
+// region's frame, the game advances that region's frame counter (its last
+// u16), so the region with the newer counter holds the newest complete frame,
+// and the DSP doesn't write that region again for two frames (~9.8 ms).
+// (Layout from Citra/Azahar's notes on the DSP firmware. Checked on a New 3DS
+// with a homebrew app and in Ocarina of Time 3D: polling about once a
+// millisecond read every frame back complete and in order.)
+//
+// The audio thread copies each new frame into staging memory, and the writer
+// thread writes staged frames to an audio ring at the start of the ring file,
+// so a save is still just a rename. Each video frame records how many audio
+// samples had been captured when it was, which places it in the audio. Frames
+// the audio thread misses, and stretches where the DSP produces none (no game
+// audio running), are filled with silence, so the audio keeps real time like
+// the video.
+
+#define FLASHBACK_DSP_REGION0           0x1FF50000
+#define FLASHBACK_DSP_REGION1           0x1FF70000
+#define FLASHBACK_DSP_FINAL_OFFSET      0xA80       // DSP address 0x8540 (word) in region 0
+#define FLASHBACK_DSP_COUNTER_OFFSET    0x7FFE      // DSP address 0xBFFF: the frame counter
+#define FLASHBACK_AUDIO_FRAME_SAMPLES   160
+#define FLASHBACK_AUDIO_FRAME_BYTES     (FLASHBACK_AUDIO_FRAME_SAMPLES * 4)     // stereo PCM16
+#define FLASHBACK_AUDIO_FRAME_TICKS     (FLASHBACK_AUDIO_FRAME_SAMPLES * 8192)  // ARM11 ticks per audio frame
+#define FLASHBACK_AUDIO_RATE_MHZ        32728498    // SYSCLOCK_ARM11 / 8192, in millihertz
+// Audio is written in chunks of this many frames (20480 bytes, a whole number
+// of SD sectors). The ring and the staging memory hold whole chunks, so a chunk
+// never wraps around in either.
+#define FLASHBACK_AUDIO_CHUNK_FRAMES    32
+#define FLASHBACK_AUDIO_STAGE_FRAMES    128         // ~0.6 s of staging
+// The audio ring holds this much more than the clip length, so a clip's audio
+// is all still there when it's saved.
+#define FLASHBACK_AUDIO_EXTRA_SECONDS   2
+
+static volatile bool g_wantAudio = true;    // chosen in the menu
+static volatile bool g_audio;               // in effect (part of the recording format)
+static u32 g_audioCapFrames;                // audio ring capacity in frames (0 without audio)
+static u32 g_audioBytes;                    // the audio ring's size: the video slots start after it
+static u32 g_audioStageOffset;              // audio staging memory, in g_mem
+
+// Audio frames since the ring started: captured (audio thread), written in
+// whole chunks (writer; frees their staging), and on the SD card (writer; ahead
+// of g_audioConsumed after an unfinished chunk was written for a save).
+static volatile u32 g_audioProduced, g_audioConsumed, g_audioFlushed;
+static volatile u32 g_audioMissed;          // frames filled with silence because the thread missed them
+static volatile bool g_audioCapture;        // capture thread -> audio thread: capture now
+static volatile bool g_audioIdle = true;    // audio thread -> capture thread: not capturing
+static volatile bool g_audioFlushRequest;   // writer: write unfinished chunks too (for a save)
+
+// Audio position (samples since the ring started) of each ring slot's frame.
+static u32   g_slotAudioPos[FLASHBACK_MAX_FRAMES];
+
+static MyThread flashbackAudioThread;
+static u8 CTR_ALIGN(8) flashbackAudioStack[0x1000];
+static bool g_audioRunning;                 // the audio thread exists
+
 // Frames waiting to be written to the ring file. The capture thread captures
 // and compresses frames into staging slots, and the writer thread writes them
 // out, so capturing the next frame overlaps with writing the previous ones.
@@ -181,7 +244,14 @@ static volatile u32 g_writeTotalUs, g_writeTotalFrames;
 static u64 g_winStart, g_winCaptureTicks, g_winCompressTicks, g_winPackedBytes;
 static u32 g_winFrames, g_winWriteUs0, g_winWriteFrames0;
 
-static void flashbackApplyFormat(u32 res, u32 fpsIdx, u32 lenIdx)
+static u32 flashbackAudioFramesFor(u32 seconds)
+{
+    // (64-bit: SYSCLOCK_ARM11 is a 32-bit constant, and 16 s of ticks don't fit in 32 bits.)
+    u32 frames = (u32)((u64)(seconds + FLASHBACK_AUDIO_EXTRA_SECONDS) * SYSCLOCK_ARM11 / FLASHBACK_AUDIO_FRAME_TICKS) + 1;
+    return (frames + FLASHBACK_AUDIO_CHUNK_FRAMES - 1) / FLASHBACK_AUDIO_CHUNK_FRAMES * FLASHBACK_AUDIO_CHUNK_FRAMES;
+}
+
+static void flashbackApplyFormat(u32 res, u32 fpsIdx, u32 lenIdx, bool audio)
 {
     g_res = res;
     g_fpsIdx = fpsIdx;
@@ -203,6 +273,15 @@ static void flashbackApplyFormat(u32 res, u32 fpsIdx, u32 lenIdx)
     // area while saving; the two never overlap in time.
     g_bmpOffset = (FLASHBACK_STAGE_SLOTS * g_slotStride + 0xFFF) & ~0xFFF;
     g_memSize = (g_bmpOffset + g_bmpBytes + 0xFFF) & ~0xFFF;
+
+    // Audio: a ring at the start of the ring file (a whole number of chunks,
+    // so the video slots after it stay sector-aligned), and staging memory.
+    g_audio = audio;
+    g_audioCapFrames = audio ? flashbackAudioFramesFor(g_lengthChoices[lenIdx]) : 0;
+    g_audioBytes = g_audioCapFrames * FLASHBACK_AUDIO_FRAME_BYTES;
+    g_audioStageOffset = g_memSize;
+    if (audio)
+        g_memSize += (FLASHBACK_AUDIO_STAGE_FRAMES * FLASHBACK_AUDIO_FRAME_BYTES + 0xFFF) & ~0xFFF;
 }
 
 static void flashbackResetStats(void)
@@ -608,14 +687,53 @@ static Result flashbackCreateDirectory(FS_Archive archive, const char *path)
     return (u32)res == 0xC82044BE ? 0 : res; // already exists
 }
 
+// Writes the next whole chunk of staged audio to the audio ring, or with
+// 'unfinished', the frames of an unfinished chunk too (for a save; the chunk is
+// written again once it's complete). Returns false if there was nothing to write.
+static bool flashbackWriteAudio(bool unfinished)
+{
+    if (!g_audio)
+        return false;
+
+    u32 consumed = g_audioConsumed;     // always the start of a chunk
+    u32 pending = g_audioProduced - consumed;
+    if (pending < FLASHBACK_AUDIO_CHUNK_FRAMES && !(unfinished && pending != 0 && g_audioFlushed != consumed + pending))
+        return false;
+    __sync_synchronize();   // see the staged frames before writing them
+
+    u32 n = pending < FLASHBACK_AUDIO_CHUNK_FRAMES ? pending : FLASHBACK_AUDIO_CHUNK_FRAMES;
+    if (!g_writeFailed)
+    {
+        u64 total;
+        // (An unfinished chunk rounded up to whole sectors also overwrites the
+        // start of the chunk's next frames: the ring's oldest audio, outside
+        // any clip, and rewritten anyway once the chunk is complete.)
+        u32 len = (n * FLASHBACK_AUDIO_FRAME_BYTES + 511) & ~511;
+        const u8 *src = g_mem + g_audioStageOffset + (consumed % FLASHBACK_AUDIO_STAGE_FRAMES) * FLASHBACK_AUDIO_FRAME_BYTES;
+        g_ring.pos = (u64)(consumed % g_audioCapFrames) * FLASHBACK_AUDIO_FRAME_BYTES;
+        if (R_FAILED(IFile_Write(&g_ring, &total, src, len, 0)) || total != len)
+            g_writeFailed = true;
+    }
+
+    __sync_synchronize();   // finish with the staging before handing it back
+    g_audioFlushed = consumed + n;
+    if (n == FLASHBACK_AUDIO_CHUNK_FRAMES)
+        g_audioConsumed = consumed + n;
+    return true;
+}
+
 // Writes every staged frame to its ring slot, oldest first. Only the frame's
 // (compressed) bytes are written, rounded up to whole SD sectors so the card
-// never has to read back a partially covered one. Runs on the writer thread,
-// or inline on the capture thread if the writer couldn't be started.
+// never has to read back a partially covered one. Staged audio goes first: its
+// writes are small and its staging is the smaller margin. Runs on the writer
+// thread, or inline on the capture thread if the writer couldn't be started.
 static void flashbackWritePending(void)
 {
     for (;;)
     {
+        if (flashbackWriteAudio(g_audioFlushRequest))
+            continue;
+
         u32 consumed = g_stageConsumed;
         if (g_stageProduced == consumed)
             return;
@@ -633,7 +751,7 @@ static void flashbackWritePending(void)
                 len = g_slotStride;
             u64 t0 = svcGetSystemTick();
 
-            g_ring.pos = (u64)g_stageRingIdx[slot] * g_slotStride;   // pre-sized file: always an overwrite
+            g_ring.pos = g_audioBytes + (u64)g_stageRingIdx[slot] * g_slotStride;   // pre-sized file: always an overwrite
             if (R_FAILED(IFile_Write(&g_ring, &total, g_mem + slot * g_slotStride, len, 0)) || total != len)
                 g_writeFailed = true;
             else
@@ -659,22 +777,174 @@ static void flashbackWriterThreadMain(void)
     }
 }
 
-// Waits until every staged frame has been written, so the ring file and the
-// staging slots can be used or freed by the capture thread.
+// Waits until every staged frame (and audio, unfinished chunk included) has
+// been written, so the ring file and the staging memory can be used or freed
+// by the capture thread. Audio capture must be paused (flashbackAudioPause).
 static void flashbackDrainWrites(void)
 {
+    g_audioFlushRequest = true;
     if (!g_writerRunning)
-    {
         flashbackWritePending();
-        return;
-    }
-
-    while (g_stageProduced != g_stageConsumed)
+    else
     {
-        LightEvent_Signal(&g_writeEvent);
-        svcSleepThread(1 * 1000 * 1000LL);
+        while (g_stageProduced != g_stageConsumed || g_audioFlushed != g_audioProduced)
+        {
+            LightEvent_Signal(&g_writeEvent);
+            svcSleepThread(1 * 1000 * 1000LL);
+        }
     }
+    g_audioFlushRequest = false;
     __sync_synchronize();
+}
+
+// Stops audio capture, and waits until the audio thread is no longer touching
+// the staging memory or the audio counters.
+static void flashbackAudioPause(void)
+{
+    g_audioCapture = false;
+    __sync_synchronize();
+    while (g_audioRunning && !g_audioIdle)
+        svcSleepThread(1 * 1000 * 1000LL);
+    __sync_synchronize();
+}
+
+// An empty audio buffer (with capture paused).
+static void flashbackAudioReset(void)
+{
+    g_audioProduced = g_audioConsumed = g_audioFlushed = 0;
+    g_audioMissed = 0;
+}
+
+// Audio samples in 'frames' video frames (at the recording's frame rate).
+static inline u32 flashbackAudioSamplesFor(u32 frames)
+{
+    return (u32)((u64)frames * SYSCLOCK_ARM11 / ((u64)g_fps * 8192));
+}
+
+// Audio is recorded only if the audio thread could be started.
+static inline bool flashbackAudioWanted(void)
+{
+    return g_wantAudio && g_audioRunning;
+}
+
+static inline bool flashbackCounterNewer(u16 a, u16 b)
+{
+    return a != b && (u16)(a - b) < 0x8000;
+}
+
+// Appends one audio frame to the staging memory: a copy of 'src', or silence
+// if it's NULL. Returns false if the staging memory is full (the writer is
+// behind): the frame is lost, and the time it covered is filled in later.
+static bool flashbackAppendAudio(const u32 *src)
+{
+    u32 produced = g_audioProduced;
+    if (produced - g_audioConsumed >= FLASHBACK_AUDIO_STAGE_FRAMES)
+        return false;
+
+    u32 *dst = (u32 *)(g_mem + g_audioStageOffset + (produced % FLASHBACK_AUDIO_STAGE_FRAMES) * FLASHBACK_AUDIO_FRAME_BYTES);
+    if (src != NULL)
+        memcpy(dst, src, FLASHBACK_AUDIO_FRAME_BYTES);
+    else
+        memset(dst, 0, FLASHBACK_AUDIO_FRAME_BYTES);
+    __sync_synchronize();   // the frame must be visible before it's counted
+    g_audioProduced = produced + 1;
+
+    if ((produced + 1) % FLASHBACK_AUDIO_CHUNK_FRAMES == 0 && g_writerRunning)
+        LightEvent_Signal(&g_writeEvent);
+    return true;
+}
+
+// Captures the DSP's output while the capture thread asks for it. Reads go
+// through Luma's uncached mapping of physical memory (PA_PTR), so there's no
+// cache to manage. A "run" is a stretch of capturing between pauses (recording
+// off, a Rosalina menu open, a save): the audio, like the video, skips pauses.
+static void flashbackAudioThreadMain(void)
+{
+    const u8 *region[2] = { (const u8 *)PA_PTR(FLASHBACK_DSP_REGION0), (const u8 *)PA_PTR(FLASHBACK_DSP_REGION1) };
+    u32 block[FLASHBACK_AUDIO_FRAME_BYTES / 4];
+    bool capturing = false;
+    u16 last = 0;
+    u64 lastTick = 0, runTicks = 0;
+    u32 runStart = 0;
+
+    while (!preTerminationRequested)
+    {
+        // (The capture thread clears g_audioCapture and then waits for
+        // g_audioIdle; checking g_audioCapture again after clearing g_audioIdle
+        // means it can never miss an iteration that's under way.)
+        if (!g_audioCapture)
+        {
+            capturing = false;
+            g_audioIdle = true;
+            svcSleepThread(10 * 1000 * 1000LL);     // (not recording: nothing to keep up with)
+            continue;
+        }
+        g_audioIdle = false;
+        __sync_synchronize();
+        if (!g_audioCapture)
+            continue;
+
+        u64 now = svcGetSystemTick();
+        u16 c0 = *(const vu16 *)(region[0] + FLASHBACK_DSP_COUNTER_OFFSET);
+        u16 c1 = *(const vu16 *)(region[1] + FLASHBACK_DSP_COUNTER_OFFSET);
+        u32 r = flashbackCounterNewer(c0, c1) ? 0 : 1;
+        u16 top = r == 0 ? c0 : c1;
+
+        if (!capturing)
+        {
+            // A new run: take frames from the next one on.
+            capturing = true;
+            last = top;
+            lastTick = now;
+            runTicks = 0;
+            runStart = g_audioProduced;
+            svcSleepThread(1 * 1000 * 1000LL);
+            continue;
+        }
+
+        runTicks += now - lastTick;
+        lastTick = now;
+        u32 wanted = (u32)(runTicks / FLASHBACK_AUDIO_FRAME_TICKS);   // frames this run should have by now
+        bool got = false;
+
+        if (flashbackCounterNewer(top, last))
+        {
+            u16 step = (u16)(top - last);
+            const vu32 *src = (const vu32 *)(region[r] + FLASHBACK_DSP_FINAL_OFFSET);
+            for (u32 i = 0; i < FLASHBACK_AUDIO_FRAME_BYTES / 4; i++)
+                block[i] = src[i];
+
+            // The frame stays put until the counters have moved on twice more;
+            // if they have (this thread was held up mid-copy), it may be torn.
+            u16 d0 = *(const vu16 *)(region[0] + FLASHBACK_DSP_COUNTER_OFFSET);
+            u16 d1 = *(const vu16 *)(region[1] + FLASHBACK_DSP_COUNTER_OFFSET);
+            u16 top2 = flashbackCounterNewer(d0, d1) ? d0 : d1;
+            bool torn = flashbackCounterNewer(top2, top) && (u16)(top2 - top) >= 2;
+
+            // Frames missed since the last one become silence; a big jump
+            // (the DSP restarted, ...) is left to the time check below. Never
+            // more than real time allows, in case the DSP had stopped for a
+            // while and the time check already filled that in.
+            u32 have = g_audioProduced - runStart;
+            u32 room = wanted + 1 > have + 1 ? wanted - have : 0;
+            u32 fill = step > 1 && step <= 16 ? step - 1u : 0;
+            for (u32 i = 0; i < fill && i < room && flashbackAppendAudio(NULL); i++)
+                g_audioMissed++;
+            if (!flashbackAppendAudio(torn ? NULL : block) || torn)
+                g_audioMissed++;
+            last = top;
+            got = true;
+        }
+
+        // No frames from the DSP (the game isn't playing audio, or isn't
+        // running): keep real time with silence.
+        while (g_audioProduced - runStart + 3 < wanted && flashbackAppendAudio(NULL))
+            ;
+
+        // The next frame is due ~4.9 ms after this one: sleep most of that.
+        svcSleepThread(got ? 3500 * 1000LL : 1000 * 1000LL);
+    }
+    g_audioIdle = true;
 }
 
 // Opens (creating it if needed) the ring file at its full size. Allocating the
@@ -687,7 +957,7 @@ static Result flashbackOpenRing(FS_Archive archive)
                                        FS_OPEN_CREATE | FS_OPEN_READ | FS_OPEN_WRITE);
     if (R_SUCCEEDED(res))
     {
-        res = IFile_SetSize(&g_ring, (u64)g_frames * g_slotStride);
+        res = IFile_SetSize(&g_ring, g_audioBytes + (u64)g_frames * g_slotStride);
         if (R_SUCCEEDED(res))
             FSFILE_SetPriority(g_ring.handle, FLASHBACK_RING_FS_PRIORITY);
         else
@@ -701,6 +971,8 @@ static Result flashbackStart(void)
     Result res;
     u32 tmp;
     FS_Archive archive;
+
+    flashbackAudioPause();
 
     res = svcControlMemoryEx(&tmp, FLASHBACK_MEM_ADDR, 0, g_memSize,
                              MEMOP_ALLOC | MEMOP_REGION_SYSTEM, MEMPERM_READWRITE, true);
@@ -727,6 +999,7 @@ static Result flashbackStart(void)
     g_head = 0;
     g_count = 0;
     memset(g_repeat, 0, sizeof(g_repeat));
+    flashbackAudioReset();
     g_writeFailed = false;
     g_ringLost = false;
     g_active = true;
@@ -740,6 +1013,7 @@ static void flashbackStop(void)
     if (!g_active)
         return;
 
+    flashbackAudioPause();
     flashbackDrainWrites();     // the writer must be done with the file and slots
     IFile_Close(&g_ring);
     svcControlMemory(&tmp, FLASHBACK_MEM_ADDR, 0, g_memSize, MEMOP_FREE, 0);
@@ -781,6 +1055,7 @@ static bool flashbackRecordFrame(void)
 
     g_repeat[g_head] = 0;
     g_slotLen[g_head] = len;
+    g_slotAudioPos[g_head] = g_audioProduced * FLASHBACK_AUDIO_FRAME_SAMPLES;
     g_stageRingIdx[slot] = g_head;
     g_stageLen[slot] = len;
     __sync_synchronize();   // frame, ring slot and size must be visible before the frame is handed over
@@ -897,7 +1172,7 @@ static bool flashbackReadSlots(u32 idx, u32 count, u8 *dst)
         u8 *frame = dst + i * g_slotBytes;
         bool packed = len < g_slotBytes;
 
-        g_ring.pos = (u64)(idx + i) * g_slotStride;
+        g_ring.pos = g_audioBytes + (u64)(idx + i) * g_slotStride;
         if (R_FAILED(IFile_Read(&g_ring, &total, packed ? scratch : frame, len)) || total != len)
             return false;
         if (packed && !flashbackDecompress(scratch, len, (u16 *)frame, g_w * g_h))
@@ -962,8 +1237,84 @@ static void flashbackFreeSaveBuffer(FlashbackSaveBuffer *buf)
     buf->allocSize = 0;
 }
 
-// BMP format: <clip>/frame_000.bmp, frame_001.bmp, ... Frames are read from the
-// ring in batches; each BMP is still its own file.
+// The oldest sample the audio ring still holds, when 'end' is one past the
+// newest: all but the oldest chunk, which a partly written chunk (see
+// flashbackWriteAudio) may have overwritten.
+static u32 flashbackAudioOldest(u32 end)
+{
+    u32 held = (g_audioCapFrames - FLASHBACK_AUDIO_CHUNK_FRAMES) * FLASHBACK_AUDIO_FRAME_SAMPLES;
+    return end > held ? end - held : 0;
+}
+
+// Reads audio samples first .. first + count - 1 from the audio ring into 'dst'
+// (stereo PCM16); samples the ring doesn't hold (any more, or yet) are silence.
+static bool flashbackReadAudio(u32 first, u32 count, u8 *dst)
+{
+    u32 cap = g_audioCapFrames * FLASHBACK_AUDIO_FRAME_SAMPLES;
+    u32 end = g_audioFlushed * FLASHBACK_AUDIO_FRAME_SAMPLES;
+    u32 oldest = flashbackAudioOldest(end);
+
+    memset(dst, 0, count * 4);
+    u32 a = first < oldest ? oldest : first;
+    u32 b = first + count < end ? first + count : end;
+    while (a < b)
+    {
+        u64 total;
+        u32 pos = a % cap;
+        u32 n = b - a < cap - pos ? b - a : cap - pos;
+        g_ring.pos = (u64)pos * 4;
+        if (R_FAILED(IFile_Read(&g_ring, &total, dst + (a - first) * 4, n * 4)) || total != n * 4)
+            return false;
+        a += n;
+    }
+    return true;
+}
+
+// With BMP frames, the clip's audio goes in <clip>/audio.wav.
+static bool flashbackSaveWav(FS_Archive archive, const char *clip, const FlashbackClipPlan *plan, u8 *buf, u32 bufBytes)
+{
+    u32 copies;
+    u32 idx = flashbackPlanSlot(plan, 0, &copies);
+    u32 first = g_slotAudioPos[idx] + flashbackAudioSamplesFor(plan->trimFirst);
+    u32 count = flashbackAudioSamplesFor(plan->frames);
+    u32 rate = FLASHBACK_AUDIO_RATE_MHZ / 1000;
+    char path[128];
+    IFile file = {0};
+    u64 total;
+
+    sprintf(path, "%s/audio.wav", clip);
+    if (R_FAILED(IFile_OpenFromArchive(&file, archive, fsMakePath(PATH_ASCII, path), FS_OPEN_CREATE | FS_OPEN_WRITE)))
+        return false;
+
+    u8 header[44];
+    memcpy(header, "RIFF", 4);
+    flashbackPut32(header + 4, 36 + count * 4);
+    memcpy(header + 8, "WAVEfmt ", 8);
+    flashbackPut32(header + 16, 16);
+    flashbackPut16(header + 20, 1);             // PCM
+    flashbackPut16(header + 22, 2);             // stereo
+    flashbackPut32(header + 24, rate);
+    flashbackPut32(header + 28, rate * 4);      // bytes per second
+    flashbackPut16(header + 32, 4);             // bytes per sample frame
+    flashbackPut16(header + 34, 16);            // bits per sample
+    memcpy(header + 36, "data", 4);
+    flashbackPut32(header + 40, count * 4);
+
+    bool ok = R_SUCCEEDED(IFile_Write(&file, &total, header, sizeof(header), 0)) && total == sizeof(header);
+    u32 perRead = bufBytes / 4;
+    for (u32 done = 0; ok && done < count; )
+    {
+        u32 n = count - done < perRead ? count - done : perRead;
+        ok = flashbackReadAudio(first + done, n, buf) &&
+             R_SUCCEEDED(IFile_Write(&file, &total, buf, n * 4, 0)) && total == n * 4;
+        done += n;
+    }
+    IFile_Close(&file);
+    return ok;
+}
+
+// BMP format: <clip>/frame_000.bmp, frame_001.bmp, ... (and audio.wav with
+// audio). Frames are read from the ring in batches; each BMP is still its own file.
 static s32 flashbackSaveBmp(FS_Archive archive, const char *clip, const FlashbackClipPlan *plan)
 {
     u8 *bmp = g_mem + g_bmpOffset;
@@ -1004,26 +1355,46 @@ static s32 flashbackSaveBmp(FS_Archive archive, const char *clip, const Flashbac
         }
     }
 
+    if (g_audio)
+        flashbackSaveWav(archive, clip, plan, buf.data, buf.frames * g_slotBytes);
+
 end:
     flashbackFreeSaveBuffer(&buf);
     return written;
 }
 
 // Clip file format (<clip>.flb): the ring file itself, renamed, with an index
-// and a trailer appended. Saving this way copies no frame data, so it takes a
-// few seconds however long the clip is; the PC-side converter
+// and a trailer appended. Saving this way copies no frame or audio data, so it
+// takes a few seconds however long the clip is; the PC-side converter
 // (convert_flashback.bat, in https://github.com/LiamTrader43/Flashback-Studio)
-// decodes it into a video. Keep that reader in step with any change here.
+// decodes it into a video, and Flashback Studio plays it on the 3DS. Keep
+// those readers in step with any change here.
 //
+// Version 1, recorded without audio:
 //   [ring slots]    slot i at offset i * slotStride: a compressed frame, or the
 //                   raw frame if its size is slotBytes (see flashbackCompress)
 //   [index]         entryCount x { u32 slot, u32 size, u32 copies }: the clip's
 //                   frames oldest first, each slot shown 'copies' times
 //   [trailer]       FlashbackClipTrailer, the last 48 bytes of the file
+//
+// Version 3, recorded with audio:
+//   [audio ring]    audio.capacity stereo PCM16 samples: sample i (counting from
+//                   when the ring started) at audio.offset + (i % capacity) * 4
+//   [ring slots]    as in version 1, after the audio ring
+//   [index]         entryCount x { u32 offset, u32 size, u32 copies, u32 audioPos }:
+//                   as in version 1, but with each frame's offset in the file,
+//                   and the audio sample at which it's first shown (each copy
+//                   comes sampleRate / fps samples after the one before)
+//   [audio info]    FlashbackClipAudioInfo (32 bytes), including which samples
+//                   the ring holds (first .. end - 1)
+//   [trailer]       FlashbackClipTrailer, as in version 1
+//
+// (Version 2 is a clip without audio, compacted by Flashback Studio.)
 // All values little-endian. Frames are RGB565, top row first.
 
-#define FLASHBACK_CLIP_MAGIC    0x4B424C46  // "FLBK"
-#define FLASHBACK_CLIP_VERSION  1
+#define FLASHBACK_CLIP_MAGIC            0x4B424C46  // "FLBK"
+#define FLASHBACK_CLIP_VERSION          1
+#define FLASHBACK_CLIP_VERSION_AUDIO    3
 
 typedef struct FlashbackClipTrailer {
     u32 magic;
@@ -1038,7 +1409,21 @@ typedef struct FlashbackClipTrailer {
 } FlashbackClipTrailer;
 _Static_assert(sizeof(FlashbackClipTrailer) == 48, "the clip trailer is 48 bytes");
 
-// Builds the clip's index and trailer into 'buf'; returns their size.
+typedef struct FlashbackClipAudioInfo {
+    u32 sampleRate;     // in millihertz
+    u16 channels;       // 2
+    u16 bitsPerSample;  // 16
+    u32 offset;         // where the audio ring starts
+    u32 capacity;       // samples the ring has room for: sample i is at offset + (i % capacity) * 4
+    u32 first;          // the oldest sample held
+    u32 end;            // one past the newest sample held
+    u32 missed;         // audio frames (of 160 samples) filled with silence because the recorder missed them
+    u32 reserved;
+} FlashbackClipAudioInfo;
+_Static_assert(sizeof(FlashbackClipAudioInfo) == 32, "the clip audio info is 32 bytes");
+
+// Builds the clip's index, audio info (with audio) and trailer into 'buf';
+// returns their size.
 static u32 flashbackBuildClipIndex(const FlashbackClipPlan *plan, u32 indexOffset, u8 *buf)
 {
     u32 *entry = (u32 *)buf;
@@ -1046,15 +1431,41 @@ static u32 flashbackBuildClipIndex(const FlashbackClipPlan *plan, u32 indexOffse
     {
         u32 copies;
         u32 idx = flashbackPlanSlot(plan, i, &copies);
-        *entry++ = idx;
-        *entry++ = g_slotLen[idx];
-        *entry++ = copies;
+        if (g_audio)
+        {
+            *entry++ = g_audioBytes + idx * g_slotStride;
+            *entry++ = g_slotLen[idx];
+            *entry++ = copies;
+            // (The oldest entry may start a few copies in: see flashbackPlanClip.)
+            *entry++ = g_slotAudioPos[idx] + flashbackAudioSamplesFor(i == 0 ? plan->trimFirst : 0);
+        }
+        else
+        {
+            *entry++ = idx;
+            *entry++ = g_slotLen[idx];
+            *entry++ = copies;
+        }
+    }
+
+    if (g_audio)
+    {
+        FlashbackClipAudioInfo *a = (FlashbackClipAudioInfo *)entry;
+        memset(a, 0, sizeof(*a));
+        a->sampleRate = FLASHBACK_AUDIO_RATE_MHZ;
+        a->channels = 2;
+        a->bitsPerSample = 16;
+        a->offset = 0;
+        a->capacity = g_audioCapFrames * FLASHBACK_AUDIO_FRAME_SAMPLES;
+        a->end = g_audioFlushed * FLASHBACK_AUDIO_FRAME_SAMPLES;
+        a->first = flashbackAudioOldest(a->end);
+        a->missed = g_audioMissed;
+        entry = (u32 *)(a + 1);
     }
 
     FlashbackClipTrailer *t = (FlashbackClipTrailer *)entry;
     memset(t, 0, sizeof(*t));
     t->magic = FLASHBACK_CLIP_MAGIC;
-    t->version = FLASHBACK_CLIP_VERSION;
+    t->version = g_audio ? FLASHBACK_CLIP_VERSION_AUDIO : FLASHBACK_CLIP_VERSION;
     t->width = g_w;
     t->height = g_h;
     t->fps = g_fps;
@@ -1077,7 +1488,7 @@ static s32 flashbackSaveClipFile(FS_Archive archive, const char *clip, const Fla
 
     // The ring always starts at slot 0, so until it has wrapped once the clip
     // only uses its first g_count slots: the rest can be trimmed off.
-    u32 dataEnd = (g_count < g_frames ? g_count : g_frames) * g_slotStride;
+    u32 dataEnd = g_audioBytes + (g_count < g_frames ? g_count : g_frames) * g_slotStride;
     u8 *index = g_mem + g_bmpOffset;    // scratch buffer, free while saving
     u32 indexSize = flashbackBuildClipIndex(plan, dataEnd, index);
 
@@ -1111,6 +1522,7 @@ static s32 flashbackSaveClipFile(FS_Archive archive, const char *clip, const Fla
     g_head = 0;
     g_count = 0;
     memset(g_repeat, 0, sizeof(g_repeat));
+    flashbackAudioReset();
     if (R_FAILED(flashbackOpenRing(archive)))
         g_ringLost = true;  // no space for a new ring: the capture thread stops recording
     return result;
@@ -1123,8 +1535,10 @@ static s32 flashbackSave(void)
     if (!g_active || g_count == 0)
         return -1;
 
-    // Frames still waiting to be written belong at the end of the clip, and
-    // the save reads the ring file and reuses the staging slots.
+    // Frames and audio still waiting to be written belong at the end of the
+    // clip, and the save reads the ring file and reuses the staging slots.
+    // (Audio capture resumes along with recording, once the save is done.)
+    flashbackAudioPause();
     flashbackDrainWrites();
 
     FS_Archive archive;
@@ -1164,9 +1578,9 @@ static s32 flashbackSave(void)
 #define FLASHBACK_SETTINGS_FILE     FLASHBACK_DIR "/settings.bin"
 #define FLASHBACK_SETTINGS_MAGIC    0x54534246  // "FBST"
 // Version 2 added the clip length, as an index into the 5 to 30 second list of
-// that time; version 3 stores it in seconds, so the list can change. Older
-// files still load.
-#define FLASHBACK_SETTINGS_VERSION  3
+// that time; version 3 stores it in seconds, so the list can change; version 4
+// added audio. Older files still load.
+#define FLASHBACK_SETTINGS_VERSION  4
 
 typedef struct FlashbackSettings {
     u32 magic;
@@ -1179,7 +1593,9 @@ typedef struct FlashbackSettings {
     u32 saveCombo;
     // Version 2 and later:
     u8  length;         // clip length in seconds (version 2: index into { 5, 10, ..., 30 })
-    u8  reserved[3];
+    // Version 4 and later:
+    u8  audio;          // record audio: 1 or 0
+    u8  reserved[2];
 } FlashbackSettings;
 
 // The shortest available length that's at least 'seconds' (or the longest).
@@ -1208,6 +1624,7 @@ static FlashbackSettings flashbackCurrentSettings(void)
     s.format = (u8)g_saveFormat;
     s.saveCombo = g_saveCombo;
     s.length = (u8)g_lengthChoices[g_wantLenIdx];
+    s.audio = g_wantAudio ? 1 : 0;
     return s;
 }
 
@@ -1249,6 +1666,8 @@ static void flashbackLoadSettings(void)
         g_wantRes = s.res;
     if (s.fpsIdx < FLASHBACK_FPS_CHOICES)
         g_wantFpsIdx = s.fpsIdx;
+    if (s.version >= 4 && total >= sizeof(s))
+        g_wantAudio = s.audio != 0;     // (older files: the default, on)
     if (s.format < FLASHBACK_FORMAT_COUNT)
         g_saveFormat = s.format;
     // Re-checked in case the Rosalina menu combo was changed since.
@@ -1380,7 +1799,7 @@ static void flashbackThreadMain(void)
     flashbackApplyDefaults();
     if (sdMode)
         flashbackLoadSettings();
-    flashbackApplyFormat(g_wantRes, g_wantFpsIdx, g_wantLenIdx);
+    flashbackApplyFormat(g_wantRes, g_wantFpsIdx, g_wantLenIdx, flashbackAudioWanted());
 
     u64 period = SYSCLOCK_ARM11 / g_fps;
     u64 nextTick = svcGetSystemTick();
@@ -1423,10 +1842,11 @@ static void flashbackThreadMain(void)
 
         // Settings changed in the menu: the ring layout depends on them, so
         // drop the buffer and restart with the new format.
-        if (g_wantRes != g_res || g_wantFpsIdx != g_fpsIdx || g_wantLenIdx != g_lenIdx)
+        if (g_wantRes != g_res || g_wantFpsIdx != g_fpsIdx || g_wantLenIdx != g_lenIdx ||
+            flashbackAudioWanted() != g_audio)
         {
             flashbackStop();
-            flashbackApplyFormat(g_wantRes, g_wantFpsIdx, g_wantLenIdx);
+            flashbackApplyFormat(g_wantRes, g_wantFpsIdx, g_wantLenIdx, flashbackAudioWanted());
             period = SYSCLOCK_ARM11 / g_fps;
             nextTick = svcGetSystemTick();
             wasRecording = false;
@@ -1451,6 +1871,7 @@ static void flashbackThreadMain(void)
         // would only add frozen frames. Pausing here (rather than counting
         // missed frames) leaves no gap or duplicates in the clip.
         bool recording = g_enabled && g_active && !menuShouldExit && !menuIsOpen();
+        g_audioCapture = recording && g_audio;
         if (recording && !wasRecording)
             flashbackResetStats();
         if (recording)
@@ -1509,6 +1930,8 @@ static void flashbackThreadMain(void)
         LightEvent_Signal(&g_writeEvent);
         MyThread_Join(&flashbackWriterThread, -1LL);
     }
+    if (g_audioRunning)
+        MyThread_Join(&flashbackAudioThread, -1LL);
 }
 
 MyThread *flashbackCreateThread(void)
@@ -1524,6 +1947,12 @@ MyThread *flashbackCreateThread(void)
     // put a ~100 KB write at ~20 ms, but recording measured 31-36 ms per write.
     // Neither thread is essential to Rosalina: without the writer, frames are
     // written inline, and without the capture thread the recorder stays off.
+    // The audio thread, on the other hand, runs well above them: it has to
+    // catch each audio frame within the ~8 ms it stays put, so it wakes every
+    // millisecond or few, but it uses very little CPU. Without it, there's no
+    // audio.
+    g_audioRunning = R_SUCCEEDED(MyThread_Create(&flashbackAudioThread, flashbackAudioThreadMain, flashbackAudioStack,
+                                                 sizeof(flashbackAudioStack), 25, CORE_SYSTEM));
     g_writerRunning = R_SUCCEEDED(MyThread_Create(&flashbackWriterThread, flashbackWriterThreadMain, flashbackWriterStack,
                                                   sizeof(flashbackWriterStack), 59, CORE_SYSTEM));
     g_threadRunning = R_SUCCEEDED(MyThread_Create(&flashbackThread, flashbackThreadMain, flashbackThreadStack,
@@ -1631,7 +2060,8 @@ void FlashbackMenu_Show(void)
         u32 fps = g_fpsChoices[g_wantFpsIdx];
         u32 seconds = g_lengthChoices[g_wantLenIdx];
         u32 frames = seconds * fps;
-        bool applied = res == g_res && g_wantFpsIdx == g_fpsIdx && g_wantLenIdx == g_lenIdx;
+        bool audio = flashbackAudioWanted();
+        bool applied = res == g_res && g_wantFpsIdx == g_fpsIdx && g_wantLenIdx == g_lenIdx && audio == g_audio;
 
         Draw_Lock();
         Draw_ClearFramebuffer();
@@ -1647,10 +2077,15 @@ void FlashbackMenu_Show(void)
         posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Resolution: %s\n",
                                         res == FLASHBACK_RES_FULL ? "full (400x240)" : "half (200x120)");
         // Size of a saved clip of the full length: a .flb is the ring file
-        // (frames rounded up to whole SD sectors), BMPs are frames plus headers.
+        // (frames rounded up to whole SD sectors, and the audio ring), BMPs are
+        // frames plus headers (and a WAV).
         u32 frameBytes = (res == FLASHBACK_RES_FULL ? 400 * 240 : 200 * 120) * 2;
         u32 perFrame = g_saveFormat == FLASHBACK_FORMAT_RAW ? (frameBytes + 511) & ~511 : frameBytes + FLASHBACK_BMP_HEADER;
         u64 clipBytes = (u64)frames * perFrame;
+        if (audio && g_saveFormat == FLASHBACK_FORMAT_RAW)
+            clipBytes += (u64)flashbackAudioFramesFor(seconds) * FLASHBACK_AUDIO_FRAME_BYTES;
+        else if (audio)
+            clipBytes += (u64)seconds * FLASHBACK_AUDIO_RATE_MHZ / 1000 * 4;
         u32 clipTenthsMb = (u32)((clipBytes + 50000) / 100000);     // in tenths of a MB (1 MB = 1,000,000 bytes)
 
         if (clipTenthsMb < 100)
@@ -1659,8 +2094,10 @@ void FlashbackMenu_Show(void)
         else
             posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Frame rate: %lu fps   Length: %lu s (%lu MB)\n",
                                             fps, seconds, (clipTenthsMb + 5) / 10);
-        posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Format:     %s\n\n",
-                                        g_saveFormat == FLASHBACK_FORMAT_RAW ? "clip file (.flb, fast)" : "BMP frames (slow)");
+        // (One line for both: the screen has no room for another.)
+        posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Format:     %s   Audio: %s\n\n",
+                                        g_saveFormat == FLASHBACK_FORMAT_RAW ? "clip file (.flb, fast)" : "BMP frames (slow)",
+                                        !g_audioRunning ? "failed" : g_wantAudio ? "on" : "off");
 
         // Counted the same way a save would be: frame times in the clip, and
         // how many of those are dropped frames filled with a copy.
@@ -1674,8 +2111,12 @@ void FlashbackMenu_Show(void)
 
         posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Buffered:  %lu / %lu frames, %lu dropped\n",
                                         buffered, frames, dropped);
-        posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Rate:      %lu.%lu / %lu fps\n",
-                                        g_statFpsX10 / 10, g_statFpsX10 % 10, fps);
+        if (applied && g_active && g_audio)
+            posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Rate:      %lu.%lu / %lu fps   audio: %lu missed\n",
+                                            g_statFpsX10 / 10, g_statFpsX10 % 10, fps, g_audioMissed);
+        else
+            posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Rate:      %lu.%lu / %lu fps\n",
+                                            g_statFpsX10 / 10, g_statFpsX10 % 10, fps);
         posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Per frame: capture %lu.%lu, compress %lu.%lu, write %lu.%lums\n",
                                         g_statCaptureUs / 1000, (g_statCaptureUs / 100) % 10,
                                         g_statCompressUs / 1000, (g_statCompressUs / 100) % 10,
@@ -1698,10 +2139,10 @@ void FlashbackMenu_Show(void)
             posY = Draw_DrawFormattedString(10, posY, COLOR_RED, "Save failed (%ld).\n", g_lastSaveResult);
 
         posY += 10;
-        posY = Draw_DrawString(10, posY, COLOR_WHITE, "A: recording on/off   X: save clip now\n");
+        posY = Draw_DrawString(10, posY, COLOR_WHITE, "A: recording on/off   X: save clip now   B: back\n");
         posY = Draw_DrawString(10, posY, COLOR_WHITE, "Y: resolution   Left/Right: fps   L/R: length\n");
-        posY = Draw_DrawString(10, posY, COLOR_WHITE, "Up/Down: format   Select: hotkey   B: back\n");
-        posY = Draw_DrawString(10, posY, COLOR_WHITE, "Off or res/fps/length changes clear the buffer.\n\n");
+        posY = Draw_DrawString(10, posY, COLOR_WHITE, "Up/Down: format   Start: audio   Select: hotkey\n");
+        posY = Draw_DrawString(10, posY, COLOR_WHITE, "Off or res/fps/length/audio clear the buffer.\n\n");
         LumaConfig_ConvertComboToString(comboStr, g_saveCombo);
         Draw_DrawFormattedString(10, posY, COLOR_WHITE, "In game: %s saves a clip.", comboStr);
 
@@ -1733,6 +2174,8 @@ void FlashbackMenu_Show(void)
             g_wantLenIdx = g_wantLenIdx + 1;    // longer (stops at the longest)
         else if ((pressed & KEY_L) && !busy && g_wantLenIdx > 0)
             g_wantLenIdx = g_wantLenIdx - 1;    // shorter (stops at the shortest)
+        else if ((pressed & KEY_START) && !busy && g_audioRunning)
+            g_wantAudio = !g_wantAudio;
         else if (pressed & KEY_SELECT)
             FlashbackMenu_ChangeHotkey();
         else if (pressed & KEY_B)
