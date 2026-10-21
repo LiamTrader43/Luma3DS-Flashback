@@ -935,6 +935,14 @@ static void flashbackAudioThreadMain(void)
             last = top;
             got = true;
         }
+        else if (top != last)
+        {
+            // The counters went backwards: the game restarted its audio (Ocarina
+            // of Time 3D seems to, when loading), and they start over from a low
+            // count. Carry on from there; waiting for them to pass the old count
+            // again would miss up to 160 s of audio.
+            last = top;
+        }
 
         // No frames from the DSP (the game isn't playing audio, or isn't
         // running): keep real time with silence.
@@ -1035,6 +1043,10 @@ static bool flashbackRecordFrame(void)
     u8 *stage = g_mem + slot * g_slotStride;
     u16 *frame = (u16 *)(g_mem + g_bmpOffset);  // capture buffer (only saves use it otherwise)
 
+    // Where the audio is as the frame is captured (taken after the capture and
+    // compression, it put the audio up to ~20 ms early in the clip).
+    u32 audioPos = g_audioProduced * FLASHBACK_AUDIO_FRAME_SAMPLES;
+
     u64 t0 = svcGetSystemTick();
     if (!flashbackCapture(frame))
         return false;
@@ -1055,7 +1067,7 @@ static bool flashbackRecordFrame(void)
 
     g_repeat[g_head] = 0;
     g_slotLen[g_head] = len;
-    g_slotAudioPos[g_head] = g_audioProduced * FLASHBACK_AUDIO_FRAME_SAMPLES;
+    g_slotAudioPos[g_head] = audioPos;
     g_stageRingIdx[slot] = g_head;
     g_stageLen[slot] = len;
     __sync_synchronize();   // frame, ring slot and size must be visible before the frame is handed over
