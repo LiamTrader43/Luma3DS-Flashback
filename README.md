@@ -77,6 +77,8 @@ To convert clips (Windows):
 
 Each clip becomes an MP4 next to it, at twice the size with sharp pixels. It plays in any video player and imports into video editors like DaVinci Resolve. Clips that already have an MP4 are skipped, and a clip that was copied incompletely is reported instead of converted. Clips saved by older Flashback builds (`.raw` with a `.txt`) convert the same way.
 
+To watch clips on the 3DS itself, use the **Flashback Studio** app from [Flashback-Studio](https://github.com/LiamTrader43/Flashback-Studio). It plays them on the top screen with their sound, and can compact a clip to about half its size so it copies to a PC faster.
+
 **BMP frames.** Each clip is a `clip_<date>/` folder of numbered images (`frame_000.bmp`, `frame_001.bmp`, ...) that you can open directly, plus `audio.wav` with the sound. To turn them into a video, run this in the clip folder, using the frame rate you recorded at:
 
 ```
