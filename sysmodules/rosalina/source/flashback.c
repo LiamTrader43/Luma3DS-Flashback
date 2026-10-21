@@ -864,7 +864,7 @@ static void flashbackAudioThreadMain(void)
     u32 block[FLASHBACK_AUDIO_FRAME_BYTES / 4];
     bool capturing = false;
     u16 last = 0;
-    u64 lastTick = 0, runTicks = 0;
+    u64 lastTick = 0, runTicks = 0, behindSince = 0;
     u32 runStart = 0;
 
     while (!preTerminationRequested)
@@ -898,6 +898,7 @@ static void flashbackAudioThreadMain(void)
             lastTick = now;
             runTicks = 0;
             runStart = g_audioProduced;
+            behindSince = 0;
             svcSleepThread(1 * 1000 * 1000LL);
             continue;
         }
@@ -948,6 +949,27 @@ static void flashbackAudioThreadMain(void)
         // running): keep real time with silence.
         while (g_audioProduced - runStart + 3 < wanted && flashbackAppendAudio(NULL))
             ;
+
+        // That leaves the audio up to 3 frames behind real time, for as long as
+        // the run lasts (frames come at exactly real time after that), which
+        // would put the sound up to 15 ms early in the clip. Normally it's at
+        // most a frame behind (the next one is on its way); 2 or more for over
+        // 20 ms means frames went missing (the DSP paused, or restarted), so
+        // fill those in too. (A late wake-up doesn't count: the frames it
+        // skipped are filled in by 'step' above.)
+        if (g_audioProduced - runStart + 1 < wanted)
+        {
+            if (behindSince == 0)
+                behindSince = now;
+            else if (now - behindSince > SYSCLOCK_ARM11 / 50)
+            {
+                while (g_audioProduced - runStart + 1 < wanted && flashbackAppendAudio(NULL))
+                    ;
+                behindSince = 0;
+            }
+        }
+        else
+            behindSince = 0;
 
         // The next frame is due ~4.9 ms after this one: sleep most of that.
         svcSleepThread(got ? 3500 * 1000LL : 1000 * 1000LL);
