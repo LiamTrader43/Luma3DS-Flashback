@@ -226,6 +226,7 @@ static volatile u32 g_stageConsumed;    // frames written or given up on (writer
 static volatile bool g_writeFailed;     // a ring write failed (writer -> capture thread)
 static bool g_ringLost;                 // a save couldn't reopen/recreate the ring file
 static LightEvent g_writeEvent;         // signaled when a frame is staged
+static u64 g_lastFrameTicks;            // how long the last frame took to capture and compress
 
 static MyThread flashbackWriterThread;
 static u8 CTR_ALIGN(8) flashbackWriterStack[0x1000];
@@ -234,8 +235,9 @@ static bool g_writerRunning;            // false: frames are written inline by t
 // Performance stats shown in the menu, updated about once a second while recording.
 static volatile u32 g_statFpsX10;       // frames actually recorded per second, x10
 static volatile u32 g_statCaptureUs;    // average time to read + convert one frame
-static volatile u32 g_statCompressUs;   // average time to compress one frame
+static volatile u32 g_statCompressUs;   // average time to compress one frame (or turn it upright, if stored as it is)
 static volatile u32 g_statSizePct;      // average compressed size, % of the uncompressed frame
+static volatile u32 g_statRawPct;       // frames stored as they are (not compressed), %
 static volatile u32 g_statWriteUs;      // average SD write time per frame
 static volatile u32 g_lastSaveMs;       // duration of the last save
 static const char *volatile g_recordError; // why recording switched itself off, or NULL
@@ -244,7 +246,7 @@ static const char *volatile g_recordError; // why recording switched itself off,
 static volatile u32 g_writeTotalUs, g_writeTotalFrames;
 
 static u64 g_winStart, g_winCaptureTicks, g_winCompressTicks, g_winPackedBytes;
-static u32 g_winFrames, g_winWriteUs0, g_winWriteFrames0;
+static u32 g_winFrames, g_winRawFrames, g_winWriteUs0, g_winWriteFrames0;
 
 static u32 flashbackAudioFramesFor(u32 seconds)
 {
@@ -289,10 +291,10 @@ static void flashbackApplyFormat(u32 res, u32 fpsIdx, u32 lenIdx, bool audio)
 
 static void flashbackResetStats(void)
 {
-    g_statFpsX10 = g_statCaptureUs = g_statCompressUs = g_statSizePct = g_statWriteUs = 0;
+    g_statFpsX10 = g_statCaptureUs = g_statCompressUs = g_statSizePct = g_statRawPct = g_statWriteUs = 0;
     g_winStart = svcGetSystemTick();
     g_winCaptureTicks = g_winCompressTicks = g_winPackedBytes = 0;
-    g_winFrames = 0;
+    g_winFrames = g_winRawFrames = 0;
     g_winWriteUs0 = g_writeTotalUs;
     g_winWriteFrames0 = g_writeTotalFrames;
 }
@@ -310,6 +312,7 @@ static void flashbackUpdateStats(void)
         g_statCaptureUs = (u32)(g_winCaptureTicks * 1000000 / SYSCLOCK_ARM11 / g_winFrames);
         g_statCompressUs = (u32)(g_winCompressTicks * 1000000 / SYSCLOCK_ARM11 / g_winFrames);
         g_statSizePct = (u32)(g_winPackedBytes * 100 / ((u64)g_winFrames * g_slotBytes));
+        g_statRawPct = g_winRawFrames * 100 / g_winFrames;
     }
 
     u32 writeUs = g_writeTotalUs, writeFrames = g_writeTotalFrames;
@@ -318,7 +321,7 @@ static void flashbackUpdateStats(void)
 
     g_winStart = now;
     g_winCaptureTicks = g_winCompressTicks = g_winPackedBytes = 0;
-    g_winFrames = 0;
+    g_winFrames = g_winRawFrames = 0;
     g_winWriteUs0 = writeUs;
     g_winWriteFrames0 = writeFrames;
 }
@@ -499,12 +502,15 @@ static u32 flashbackCompress(const u16 *cols, u32 width, u32 height, u16 *band, 
 }
 
 // The upright frame (top row first), from a frame in the screen's order (see
-// flashbackCompress): for frames stored as they are.
+// flashbackCompress): for frames stored as they are. Turned upright a band at a
+// time, as for compressing, straight into 'dst'.
 static void flashbackColumnsToRows(const u16 *cols, u32 width, u32 height, u16 *dst)
 {
-    for (u32 y = 0; y < height; y++)
-        for (u32 x = 0; x < width; x++)
-            *dst++ = cols[x * height + (height - 1 - y)];
+    for (u32 y0 = 0; y0 < height; y0 += FLASHBACK_BAND_ROWS)
+    {
+        u32 rows = height - y0 < FLASHBACK_BAND_ROWS ? height - y0 : FLASHBACK_BAND_ROWS;
+        flashbackUprightBand(cols, width, height, y0, rows, dst + y0 * width);
+    }
 }
 
 #pragma GCC pop_options
@@ -1174,16 +1180,27 @@ static bool flashbackRecordFrame(void)
         return false;
     u64 t1 = svcGetSystemTick();
 
-    // Frames that wouldn't get smaller are stored as they are (upright).
-    u32 len = flashbackCompress(frame, g_w, g_h, (u16 *)(g_mem + g_bandOffset), stage, g_slotBytes);
+    // Frames that wouldn't get smaller are stored as they are (upright). So is a
+    // frame when the recorder is falling behind (the last frame took longer than
+    // a frame lasts: compressing at full resolution on an Old 3DS) and the SD
+    // card has time to spare (at most 2 frames waiting to be written): that
+    // trades the processor's time, which is what's running short, for the
+    // card's. Neither keeps up alone; mixed, they share the load (an Old 3DS in
+    // Mario Kart 7: 17 fps compressing every frame, 19 storing every frame as
+    // it is, 23 with ~40% stored as they are).
+    bool storeRaw = g_stageProduced - g_stageConsumed <= 2 && g_lastFrameTicks > SYSCLOCK_ARM11 / g_fps;
+    u32 len = storeRaw ? 0 : flashbackCompress(frame, g_w, g_h, (u16 *)(g_mem + g_bandOffset), stage, g_slotBytes);
     if (len == 0 || len >= g_slotBytes)
     {
         flashbackColumnsToRows(frame, g_w, g_h, (u16 *)stage);
         len = g_slotBytes;
+        g_winRawFrames++;
     }
 
+    u64 t2 = svcGetSystemTick();
+    g_lastFrameTicks = t2 - t0;
     g_winCaptureTicks += t1 - t0;
-    g_winCompressTicks += svcGetSystemTick() - t1;
+    g_winCompressTicks += t2 - t1;
     g_winPackedBytes += len;
     g_winFrames++;
 
@@ -1787,7 +1804,10 @@ static void flashbackThreadMain(void)
         bool recording = g_enabled && g_active && !menuShouldExit && !menuIsOpen();
         flashbackAudioSetCapture(recording && g_audio);
         if (recording && !wasRecording)
+        {
             flashbackResetStats();
+            g_lastFrameTicks = 0;       // not behind at a (re)start (see flashbackRecordFrame)
+        }
         if (recording)
         {
             if (!flashbackRecordFrame())
@@ -2029,8 +2049,8 @@ void FlashbackMenu_Show(void)
                                         g_statCaptureUs / 1000, (g_statCaptureUs / 100) % 10,
                                         g_statCompressUs / 1000, (g_statCompressUs / 100) % 10,
                                         g_statWriteUs / 1000, (g_statWriteUs / 100) % 10);
-        posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Budget:    %lums per frame, compressed to %lu%%\n\n",
-                                        1000 / fps, g_statSizePct);
+        posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Budget:    %lums, compressed to %lu%%, raw %lu%%\n\n",
+                                        1000 / fps, g_statSizePct, g_statRawPct);
 
         const char *recordError = g_recordError;
         if (g_saving || g_saveRequested)
