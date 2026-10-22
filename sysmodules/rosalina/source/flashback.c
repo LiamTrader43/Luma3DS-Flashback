@@ -108,8 +108,12 @@ static volatile u32 g_res = FLASHBACK_RES_FULL;
 static volatile u32 g_fpsIdx = 2;
 static volatile u32 g_lenIdx = FLASHBACK_DEFAULT_LENGTH_IDX;
 static u32 g_w, g_h, g_fps, g_frames;   // derived from g_res / g_fpsIdx / g_lenIdx
-static u32 g_slotBytes, g_frameOffset, g_memSize;
+static u32 g_slotBytes, g_frameOffset, g_bandOffset, g_memSize;
 static u32 g_slotStride;                // ring and staging slot size: g_slotBytes rounded up to whole SD sectors
+
+// Rows of the frame turned upright at a time while compressing (see
+// flashbackCompress): a cache line holds 16 pixels of a column.
+#define FLASHBACK_BAND_ROWS     16
 
 // Owned by the flashback thread.
 static bool  g_active;                  // memory allocated + ring file open
@@ -266,10 +270,11 @@ static void flashbackApplyFormat(u32 res, u32 fpsIdx, u32 lenIdx, bool audio)
     // and rewrite a partially covered sector.
     g_slotStride = (g_slotBytes + 511) & ~511;
     // Staging slots first, then a buffer that holds the frame being captured
-    // (before compression) while recording, or the clip's index while saving;
-    // the two never overlap in time.
+    // (before compression) while recording, or the clip's index while saving
+    // (the two never overlap in time), then the rows being compressed.
     g_frameOffset = (FLASHBACK_STAGE_SLOTS * g_slotStride + 0xFFF) & ~0xFFF;
-    g_memSize = (g_frameOffset + g_slotBytes + 0xFFF) & ~0xFFF;
+    g_bandOffset = g_frameOffset + g_slotBytes;
+    g_memSize = (g_bandOffset + FLASHBACK_BAND_ROWS * g_w * 2 + 0xFFF) & ~0xFFF;
 
     // Audio: a ring at the start of the ring file (a whole number of chunks,
     // so the video slots after it stay sector-aligned), and staging memory.
@@ -336,6 +341,12 @@ static void flashbackUpdateStats(void)
 // flashbackPackHash(pixel); INDEX and RUN leave the table alone. The readers
 // (Flashback-Studio's converter and 3DS app) decode it.
 
+// Compression runs for every pixel of every frame, so it's built with -O2
+// rather than Rosalina's -Os (like draw.c's -O3): on an Old 3DS that compresses
+// a full resolution frame ~11% faster.
+#pragma GCC push_options
+#pragma GCC optimize ("O2")
+
 #define FLASHBACK_PACK_RUN_MAX  62
 #define FLASHBACK_PACK_RAW      0xFE
 
@@ -351,34 +362,61 @@ static inline s32 flashbackPackWrap(s32 d, u32 bits)
     return d >= (1 << (bits - 1)) ? d - (1 << bits) : d;
 }
 
-// Compresses 'pixels' RGB565 pixels into 'dst'. Returns the compressed size,
-// or 0 if it wouldn't be smaller than 'cap' bytes (store the frame as is).
-static u32 flashbackCompress(const u16 *src, u32 pixels, u8 *dst, u32 cap)
+// Rows y0 .. y0 + rows - 1 (rows <= FLASHBACK_BAND_ROWS) of a frame in the
+// screen's order (see flashbackCompress), upright, into 'band'. A column's
+// pixels for these rows are next to each other (bottom row first): 16 columns
+// at a time go through a small tile, and out a row at a time, 16 pixels
+// together. So the frame is read in whole cache lines, each once, and the band
+// written in runs: the Old 3DS has no L2 cache, and reading or writing one
+// pixel per row (one cache line each) is very slow there.
+static void flashbackUprightBand(const u16 *cols, u32 width, u32 height, u32 y0, u32 rows, u16 *band)
 {
-    u16 index[64];
-    memset(index, 0, sizeof(index));
-    u16 prev = 0;
-    u32 run = 0;
-    u8 *out = dst;
-    const u8 *limit = dst + cap - 4;    // room for a run flush plus the largest op
+    u16 tile[FLASHBACK_BAND_ROWS][16];
 
-    for (u32 i = 0; i < pixels; i++)
+    for (u32 x0 = 0; x0 < width; x0 += 16)
     {
-        u16 px = src[i];
+        u32 n = width - x0 < 16 ? width - x0 : 16;
+        for (u32 i = 0; i < n; i++)
+        {
+            const u16 *c = cols + (x0 + i) * height + (height - y0 - rows);
+            __builtin_prefetch(c + 4 * height);     // a few columns ahead
+            for (u32 j = 0; j < rows; j++)
+                tile[rows - 1 - j][i] = c[j];
+        }
+        for (u32 r = 0; r < rows; r++)
+            memcpy(band + r * width + x0, tile[r], n * 2);
+    }
+}
+
+// Packs the pixels from 'src' up to 'end', carrying on from '*prevp', '*runp'
+// and '*outp' (updated on return). With 'check', returns false as soon as the
+// output could pass 'limit'; without, the caller has made sure it can't.
+// Always inlined into one call of each, so the check costs nothing when it's off.
+static inline __attribute__((always_inline)) bool flashbackPackPixels(const u16 *src, const u16 *end, u16 *index,
+                                                                      u16 *prevp, u32 *runp, u8 **outp,
+                                                                      const u8 *limit, bool check)
+{
+    u16 prev = *prevp;
+    u32 run = *runp;
+    u8 *out = *outp;
+
+    for (; src < end; src++)
+    {
+        u16 px = *src;
         if (px == prev)
         {
             if (++run == FLASHBACK_PACK_RUN_MAX)
             {
-                if (out > limit)
-                    return 0;
+                if (check && out > limit)
+                    return false;
                 *out++ = 0xC0 | (FLASHBACK_PACK_RUN_MAX - 1);
                 run = 0;
             }
             continue;
         }
 
-        if (out > limit)
-            return 0;
+        if (check && out > limit)
+            return false;
         if (run != 0)
         {
             *out++ = 0xC0 | (run - 1);
@@ -413,6 +451,44 @@ static u32 flashbackCompress(const u16 *src, u32 pixels, u8 *dst, u32 cap)
         prev = px;
     }
 
+    *prevp = prev;
+    *runp = run;
+    *outp = out;
+    return true;
+}
+
+// Compresses a width x height RGB565 frame into 'dst', top row first (the frame
+// is upright in the clip). The frame comes in the screen's order, as captured
+// (flashbackConvertFrame): column by column, each from the bottom row up. It's
+// turned upright FLASHBACK_BAND_ROWS rows at a time into 'band' (room for that
+// many rows) and compressed from there. Returns the compressed size, or 0 if it
+// wouldn't be smaller than 'cap' bytes (store the frame as is, upright:
+// flashbackColumnsToRows).
+static u32 flashbackCompress(const u16 *cols, u32 width, u32 height, u16 *band, u8 *dst, u32 cap)
+{
+    u16 index[64];
+    memset(index, 0, sizeof(index));
+    u16 prev = 0;
+    u32 run = 0;
+    u8 *out = dst;
+    const u8 *limit = dst + cap - 4;    // room for a run flush plus the largest op
+
+    for (u32 y0 = 0; y0 < height; y0 += FLASHBACK_BAND_ROWS)
+    {
+        u32 rows = height - y0 < FLASHBACK_BAND_ROWS ? height - y0 : FLASHBACK_BAND_ROWS;
+        u32 n = rows * width;
+        flashbackUprightBand(cols, width, height, y0, rows, band);
+
+        // A pixel adds at most 4 bytes (a run flush plus the largest op), so a
+        // band with room for 4 per pixel can't run out: it skips the check on
+        // every pixel. Only a frame that barely fits, or doesn't, ever needs it.
+        bool roomy = out <= limit && (u32)(limit - out) >= 4 * n;
+        bool ok = roomy ? flashbackPackPixels(band, band + n, index, &prev, &run, &out, limit, false)
+                        : flashbackPackPixels(band, band + n, index, &prev, &run, &out, limit, true);
+        if (!ok)
+            return 0;
+    }
+
     if (run != 0)
     {
         if (out > limit)
@@ -421,6 +497,17 @@ static u32 flashbackCompress(const u16 *src, u32 pixels, u8 *dst, u32 cap)
     }
     return (u32)(out - dst);
 }
+
+// The upright frame (top row first), from a frame in the screen's order (see
+// flashbackCompress): for frames stored as they are.
+static void flashbackColumnsToRows(const u16 *cols, u32 width, u32 height, u16 *dst)
+{
+    for (u32 y = 0; y < height; y++)
+        for (u32 x = 0; x < width; x++)
+            *dst++ = cols[x * height + (height - 1 - y)];
+}
+
+#pragma GCC pop_options
 
 static bool flashbackIsSdMode(void)
 {
@@ -445,6 +532,11 @@ typedef struct FlashbackCaptureArgs {
 // Retries for a torn frame. Each attempt flushes the framebuffer first, so a
 // retry never reads lines cached by the previous attempt.
 #define FLASHBACK_CAPTURE_ATTEMPTS  3
+
+// -O2 for the conversion too, like compression (BGR8 frames convert ~11%
+// faster on an Old 3DS; the other formats are unchanged).
+#pragma GCC push_options
+#pragma GCC optimize ("O2")
 
 static inline u16 flashbackRgb565(u32 r, u32 g, u32 b)
 {
@@ -483,27 +575,32 @@ static inline u16 flashbackPixelToRgb565(const u8 *src, u32 fmt)
     }
 }
 
-// Converts the whole frame. Always inlined into one call per format with a
-// constant 'fmt' / 'bpp', so the per-pixel format switch is resolved at compile
-// time instead of running for every pixel.
+// Converts the whole frame, in the order the screen holds it: column by column
+// (left to right), each from the bottom row up. Output column ox is
+// args->dst[ox * outH ...], so the frame's top row is the last pixel of each
+// column; compressing turns it upright (flashbackCompress). Reads and writes
+// both go straight through memory, which the Old 3DS (no L2 cache) handles far
+// better than writing an upright frame one row apart per pixel, and the read is
+// shorter, so the game swaps buffers mid-read less often.
+//
+// Always inlined into one call per format with a constant 'fmt' / 'bpp', so the
+// per-pixel format switch is resolved at compile time instead of running for
+// every pixel.
 static inline __attribute__((always_inline)) void flashbackConvertFrame(
     const FlashbackCaptureArgs *args, const u8 *fb, u32 stride, u32 stepX, u32 stepY, u32 fmt, u32 bpp)
 {
     const u32 outW = args->outW, outH = args->outH;
     const u32 colStep = stepX * stride;
     const u32 rowStep = stepY * bpp;
+    u16 *out = args->dst;
 
     for (u32 ox = 0; ox < outW; ox++)
     {
-        // Output row 0 (top) is framebuffer y = 239, the end of the column;
-        // walk the column backwards from there.
-        const u8 *src = fb + ox * colStep + (outH - 1) * rowStep;
-        u16 *out = args->dst + ox;
-        for (u32 oy = 0; oy < outH; oy++)
+        const u8 *src = fb + ox * colStep;      // the column's bottom row (framebuffer y = 0)
+        for (u32 k = 0; k < outH; k++, src += rowStep)
         {
-            *out = flashbackPixelToRgb565(src, fmt);
-            out += outW;
-            src -= rowStep;
+            __builtin_prefetch(src + 4 * 32);   // a few cache lines ahead
+            *out++ = flashbackPixelToRgb565(src, fmt);
         }
     }
 }
@@ -560,6 +657,8 @@ static void flashbackCaptureKernel(FlashbackCaptureArgs *args)
     args->torn = flashbackCurrentTopFramebuffer() != pa || ((GPU_FB_TOP_FMT ^ fmtReg) & (7 | BIT(5) | BIT(6))) != 0;
     args->ok = true;
 }
+
+#pragma GCC pop_options
 
 // Flushes (cleans + invalidates) the CPU cache lines of the framebuffer that's
 // on screen right now, and returns its physical address (0 if there is none).
@@ -1064,7 +1163,7 @@ static bool flashbackRecordFrame(void)
 
     u32 slot = g_stageProduced % FLASHBACK_STAGE_SLOTS;   // the oldest free staging slot
     u8 *stage = g_mem + slot * g_slotStride;
-    u16 *frame = (u16 *)(g_mem + g_frameOffset);    // capture buffer (only saves use it otherwise)
+    u16 *frame = (u16 *)(g_mem + g_frameOffset);    // capture buffer, in the screen's order (only saves use it otherwise)
 
     // Where the audio is as the frame is captured (taken after the capture and
     // compression, it put the audio up to ~20 ms early in the clip).
@@ -1075,11 +1174,11 @@ static bool flashbackRecordFrame(void)
         return false;
     u64 t1 = svcGetSystemTick();
 
-    // Frames that wouldn't get smaller are stored as they are.
-    u32 len = flashbackCompress(frame, g_w * g_h, stage, g_slotBytes);
+    // Frames that wouldn't get smaller are stored as they are (upright).
+    u32 len = flashbackCompress(frame, g_w, g_h, (u16 *)(g_mem + g_bandOffset), stage, g_slotBytes);
     if (len == 0 || len >= g_slotBytes)
     {
-        memcpy(stage, frame, g_slotBytes);
+        flashbackColumnsToRows(frame, g_w, g_h, (u16 *)stage);
         len = g_slotBytes;
     }
 
