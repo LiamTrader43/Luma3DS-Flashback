@@ -72,7 +72,7 @@ typedef enum FlashbackResolution {
 } FlashbackResolution;
 
 typedef enum FlashbackFormat {
-    FLASHBACK_FORMAT_RAW = 0,   // one .flb clip file, converted on a PC (fastest: the ring file is renamed)
+    FLASHBACK_FORMAT_CLIP = 0,  // one .flb clip file, converted on a PC (fastest: the ring file is renamed)
     FLASHBACK_FORMAT_BMP,       // folder of 16-bit BMP frames
     FLASHBACK_FORMAT_COUNT,
 } FlashbackFormat;
@@ -94,12 +94,12 @@ static u8 CTR_ALIGN(8) flashbackThreadStack[0x2000];
 static bool g_threadRunning;
 
 static volatile bool g_enabled;         // user toggle
-// Defaults when no settings are saved: full resolution, 30 fps, raw format on
+// Defaults when no settings are saved: full resolution, 30 fps, clip files on
 // New 3DS; half resolution, 30 fps on Old 3DS (see flashbackApplyDefaults).
 static volatile u32  g_wantRes = FLASHBACK_RES_FULL;   // FlashbackResolution chosen in the menu
 static volatile u32  g_wantFpsIdx = 2;                 // index into g_fpsChoices chosen in the menu (30 fps)
 static volatile u32  g_wantLenIdx = FLASHBACK_DEFAULT_LENGTH_IDX; // index into g_lengthChoices chosen in the menu
-static volatile u32  g_saveFormat = FLASHBACK_FORMAT_RAW; // FlashbackFormat; takes effect on the next save
+static volatile u32  g_saveFormat = FLASHBACK_FORMAT_CLIP; // FlashbackFormat; takes effect on the next save
 static volatile u32  g_saveCombo = FLASHBACK_DEFAULT_SAVE_COMBO;
 
 // Buttons allowed in the save hotkey: face buttons, D-Pad, L/R, ZL/ZR,
@@ -1691,7 +1691,7 @@ static s32 flashbackSave(void)
 
     FlashbackClipPlan plan = flashbackPlanClip();
     g_lastSaveExpected = plan.frames;
-    bool clipFile = g_saveFormat == FLASHBACK_FORMAT_RAW;
+    bool clipFile = g_saveFormat == FLASHBACK_FORMAT_CLIP;
     s32 written = clipFile ? flashbackSaveClipFile(archive, clip, &plan) : flashbackSaveBmp(archive, clip, &plan);
 
     if (written == 0 && !clipFile)
@@ -2212,9 +2212,9 @@ void FlashbackMenu_Show(void)
         // (frames rounded up to whole SD sectors, and the audio ring), BMPs are
         // frames plus headers (and a WAV).
         u32 frameBytes = (res == FLASHBACK_RES_FULL ? 400 * 240 : 200 * 120) * 2;
-        u32 perFrame = g_saveFormat == FLASHBACK_FORMAT_RAW ? (frameBytes + 511) & ~511 : frameBytes + FLASHBACK_BMP_HEADER;
+        u32 perFrame = g_saveFormat == FLASHBACK_FORMAT_CLIP ? (frameBytes + 511) & ~511 : frameBytes + FLASHBACK_BMP_HEADER;
         u64 clipBytes = (u64)frames * perFrame;
-        if (audio && g_saveFormat == FLASHBACK_FORMAT_RAW)
+        if (audio && g_saveFormat == FLASHBACK_FORMAT_CLIP)
             clipBytes += (u64)flashbackAudioFramesFor(seconds) * FLASHBACK_AUDIO_FRAME_BYTES;
         else if (audio)
             clipBytes += (u64)seconds * FLASHBACK_AUDIO_RATE_MHZ / 1000 * 4;
@@ -2228,7 +2228,7 @@ void FlashbackMenu_Show(void)
                                             fps, seconds, (clipTenthsMb + 5) / 10);
         // (One line for both: the screen has no room for another.)
         posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Format:     %s   Audio: %s\n\n",
-                                        g_saveFormat == FLASHBACK_FORMAT_RAW ? "clip file (.flb, fast)" : "BMP frames (slow)",
+                                        g_saveFormat == FLASHBACK_FORMAT_CLIP ? "clip file (.flb, fast)" : "BMP frames (slow)",
                                         !g_audioRunning ? "failed" : g_wantAudio ? "on" : "off");
 
         // Counted the same way a save would be: frame times in the clip, and
