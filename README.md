@@ -43,14 +43,13 @@ You can also save from the Flashback screen with <kbd>X</kbd>. Recording pauses 
 | <kbd>Y</kbd> | Resolution: half (200x120) or full (400x240) |
 | <kbd>Left</kbd>/<kbd>Right</kbd> | Frame rate: 10, 20 or 30 fps |
 | <kbd>L</kbd>/<kbd>R</kbd> | Clip length: 10 to 60 seconds, in 10-second steps |
-| <kbd>Up</kbd>/<kbd>Down</kbd> | Save format: clip file (`.flb`) or BMP frames |
 | <kbd>Start</kbd> | Audio: on or off |
 | <kbd>Select</kbd> | Change the save hotkey |
 | <kbd>B</kbd> | Back |
 
-Turning recording off, or changing the resolution, frame rate, length or audio, clears the buffer. Changing the save format doesn't. Opening a menu only pauses recording, so the buffer is kept.
+Turning recording off, or changing the resolution, frame rate, length or audio, clears the buffer. Opening a menu only pauses recording, so the buffer is kept.
 
-Saving a clip file (the default format) takes only a few seconds, however long the clip is: the buffer itself becomes the clip, and recording carries on with a new, empty buffer. That new buffer needs free space on the SD card, as much as a full clip (up to about 354 MB at full resolution, 30 fps and 60 seconds, with audio); if there isn't enough, recording stops and the Flashback screen says the SD card is full. Saving as BMP frames is much slower, and recording is paused while it runs.
+Saving a clip takes only a few seconds, however long the clip is: the buffer itself becomes the clip, and recording carries on with a new, empty buffer. That new buffer needs free space on the SD card, as much as a full clip (up to about 354 MB at full resolution, 30 fps and 60 seconds, with audio); if there isn't enough, recording stops and the Flashback screen says the SD card is full.
 
 The screen also shows live stats. **Rate** should stay close to the frame rate you picked. **Buffered** shows how many frames a save would contain right now, and how many of them are **dropped** frames: frames the recorder missed because it couldn't keep up, filled with a copy of the previous frame so clips still play at the right speed. If many frames are dropped, a lower resolution or frame rate will look smoother. With audio on, **Rate** also shows how many bits of audio were **missed** (see below).
 
@@ -62,9 +61,7 @@ You can use <kbd>A</kbd>, <kbd>B</kbd>, <kbd>X</kbd>, <kbd>Y</kbd>, <kbd>L</kbd>
 
 ### Where clips are saved and how to watch them
 
-Clips are saved in `/luma/flashback/` on the SD card, named after the date and time they were saved.
-
-**Clip files (default, fastest to save).** Each clip is a single `clip_<date>.flb` file.
+Clips are saved in `/luma/flashback/` on the SD card as `clip_<date>.flb` files, named after the date and time they were saved.
 
 > **`.flb` clips can only be turned into videos with `convert_flashback.bat`** from [Flashback-Studio](https://github.com/LiamTrader43/Flashback-Studio). They use Flashback's own compressed format, so video players, video editors and other tools (plain ffmpeg included) can't open them. If a clip won't play or import, running it through `convert_flashback.bat` is the way to fix it.
 
@@ -79,14 +76,6 @@ Each clip becomes an MP4 next to it, at twice the size with sharp pixels. It pla
 
 To watch clips on the 3DS itself, use the **Flashback Studio** app from [Flashback-Studio](https://github.com/LiamTrader43/Flashback-Studio). It plays them on the top screen with their sound, and can compact a clip to about half its size so it copies to a PC faster.
 
-**BMP frames.** Each clip is a `clip_<date>/` folder of numbered images (`frame_000.bmp`, `frame_001.bmp`, ...) that you can open directly, plus `audio.wav` with the sound. To turn them into a video, run this in the clip folder, using the frame rate you recorded at:
-
-```
-ffmpeg -framerate 30 -i frame_%03d.bmp -i audio.wav -vf "scale=iw*2:ih*2:flags=neighbor" -c:v libx264 -crf 12 -pix_fmt yuv420p -c:a aac -b:a 192k clip.mp4
-```
-
-(Leave out `-i audio.wav` and `-c:a aac -b:a 192k` for clips recorded with audio off.)
-
 ### SD card usage
 
 The buffer lives in `/luma/flashback/ring.bin` on the SD card, and recording writes to it continuously. Frames are compressed (losslessly) before they're written, typically to around half their size, so the amount written depends on the game.
@@ -100,7 +89,7 @@ A saved clip is the buffer file itself, so it's the same size (smaller if you sa
 
 ### Limitations
 
-* **Recording is always off after a reboot**: turn it on from the Flashback screen each time. Your other settings (resolution, frame rate, length, format and hotkey) are remembered in `/luma/flashback/settings.bin` when you leave the Flashback screen. Delete that file to go back to the defaults: full resolution and 30 fps on New 3DS/2DS (half resolution and 30 fps on Old 3DS/2DS), 10 seconds, clip file format, audio on, hotkey <kbd>L+R+Down</kbd>.
+* **Recording is always off after a reboot**: turn it on from the Flashback screen each time. Your other settings (resolution, frame rate, length, audio and hotkey) are remembered in `/luma/flashback/settings.bin` when you leave the Flashback screen. Delete that file to go back to the defaults: full resolution and 30 fps on New 3DS/2DS (half resolution and 30 fps on Old 3DS/2DS), 10 seconds, audio on, hotkey <kbd>L+R+Down</kbd>.
 * **Only the top screen** is recorded, and only the left eye when 3D is on.
 * **Audio is the game's, at full volume**: it's recorded before the volume slider, so clips have the same level however loud the 3DS is set. Sounds played through the 3DS's other sound hardware (CSND, used by a few games, some system sounds and older homebrew) aren't recorded.
 * **Converting clips needs Windows**: `convert_flashback.bat` uses PowerShell, which comes with Windows. There's no converter for macOS or Linux yet.

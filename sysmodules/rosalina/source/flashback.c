@@ -42,10 +42,10 @@
 #include "menu.h"
 #include "utils.h"
 
-// Work memory (one frame + one BMP), allocated from the SYSTEM region when
-// recording starts, never from the running game, and sized for the current
-// resolution. The address is clear of the screenshot/menu framebuffer cache
-// at 0x0D000000.
+// Work memory (staging for frames and audio, and a capture buffer), allocated
+// from the SYSTEM region when recording starts, never from the running game,
+// and sized for the current resolution. The address is clear of the
+// screenshot/menu framebuffer cache at 0x0D000000.
 #define FLASHBACK_MEM_ADDR      0x0D800000
 
 // FS priority for the ring file. Rosalina's FS session runs at real-time
@@ -71,15 +71,6 @@ typedef enum FlashbackResolution {
     FLASHBACK_RES_COUNT,
 } FlashbackResolution;
 
-typedef enum FlashbackFormat {
-    FLASHBACK_FORMAT_CLIP = 0,  // one .flb clip file, converted on a PC (fastest: the ring file is renamed)
-    FLASHBACK_FORMAT_BMP,       // folder of 16-bit BMP frames
-    FLASHBACK_FORMAT_COUNT,
-} FlashbackFormat;
-
-// 14-byte file header + 40-byte BITMAPINFOHEADER + 3 RGB565 channel masks.
-#define FLASHBACK_BMP_HEADER    (14 + 40 + 12)
-
 static const u32 g_fpsChoices[] = { 10, 20, 30 };
 #define FLASHBACK_FPS_CHOICES   (sizeof(g_fpsChoices) / sizeof(g_fpsChoices[0]))
 
@@ -94,12 +85,11 @@ static u8 CTR_ALIGN(8) flashbackThreadStack[0x2000];
 static bool g_threadRunning;
 
 static volatile bool g_enabled;         // user toggle
-// Defaults when no settings are saved: full resolution, 30 fps, clip files on
-// New 3DS; half resolution, 30 fps on Old 3DS (see flashbackApplyDefaults).
+// Defaults when no settings are saved: full resolution, 30 fps on New 3DS;
+// half resolution, 30 fps on Old 3DS (see flashbackApplyDefaults).
 static volatile u32  g_wantRes = FLASHBACK_RES_FULL;   // FlashbackResolution chosen in the menu
 static volatile u32  g_wantFpsIdx = 2;                 // index into g_fpsChoices chosen in the menu (30 fps)
 static volatile u32  g_wantLenIdx = FLASHBACK_DEFAULT_LENGTH_IDX; // index into g_lengthChoices chosen in the menu
-static volatile u32  g_saveFormat = FLASHBACK_FORMAT_CLIP; // FlashbackFormat; takes effect on the next save
 static volatile u32  g_saveCombo = FLASHBACK_DEFAULT_SAVE_COMBO;
 
 // Buttons allowed in the save hotkey: face buttons, D-Pad, L/R, ZL/ZR,
@@ -118,7 +108,7 @@ static volatile u32 g_res = FLASHBACK_RES_FULL;
 static volatile u32 g_fpsIdx = 2;
 static volatile u32 g_lenIdx = FLASHBACK_DEFAULT_LENGTH_IDX;
 static u32 g_w, g_h, g_fps, g_frames;   // derived from g_res / g_fpsIdx / g_lenIdx
-static u32 g_slotBytes, g_bmpBytes, g_bmpOffset, g_memSize;
+static u32 g_slotBytes, g_frameOffset, g_memSize;
 static u32 g_slotStride;                // ring and staging slot size: g_slotBytes rounded up to whole SD sectors
 
 // Owned by the flashback thread.
@@ -244,7 +234,6 @@ static volatile u32 g_statCompressUs;   // average time to compress one frame
 static volatile u32 g_statSizePct;      // average compressed size, % of the uncompressed frame
 static volatile u32 g_statWriteUs;      // average SD write time per frame
 static volatile u32 g_lastSaveMs;       // duration of the last save
-static volatile u32 g_lastSaveExpected; // frames the last save should have written
 static const char *volatile g_recordError; // why recording switched itself off, or NULL
 
 // Written by the writer thread only, never reset (wrap-around safe deltas).
@@ -276,12 +265,11 @@ static void flashbackApplyFormat(u32 res, u32 fpsIdx, u32 lenIdx, bool audio)
     // 48000 bytes, otherwise don't), so writes never need the card to read
     // and rewrite a partially covered sector.
     g_slotStride = (g_slotBytes + 511) & ~511;
-    g_bmpBytes = FLASHBACK_BMP_HEADER + g_slotBytes;
     // Staging slots first, then a buffer that holds the frame being captured
-    // (before compression) while recording, or a BMP / decompression scratch
-    // area while saving; the two never overlap in time.
-    g_bmpOffset = (FLASHBACK_STAGE_SLOTS * g_slotStride + 0xFFF) & ~0xFFF;
-    g_memSize = (g_bmpOffset + g_bmpBytes + 0xFFF) & ~0xFFF;
+    // (before compression) while recording, or the clip's index while saving;
+    // the two never overlap in time.
+    g_frameOffset = (FLASHBACK_STAGE_SLOTS * g_slotStride + 0xFFF) & ~0xFFF;
+    g_memSize = (g_frameOffset + g_slotBytes + 0xFFF) & ~0xFFF;
 
     // Audio: a ring at the start of the ring file (a whole number of chunks,
     // so the video slots after it stay sector-aligned), and staging memory.
@@ -343,7 +331,10 @@ static void flashbackUpdateStats(void)
 //   11rrrrrr           RUN    the previous pixel repeated 1..62 times (r = n - 1)
 //   11111110 lo hi     RAW    a full 16-bit pixel
 // Differences wrap around within each channel (5 bits for r and b, 6 for g).
-// The previous pixel starts as 0 and the table as all 0, for each frame.
+// The previous pixel starts as 0 and the table as all 0, for each frame. A
+// pixel from a DIFF, LUMA or RAW op goes into the table at slot
+// flashbackPackHash(pixel); INDEX and RUN leave the table alone. The readers
+// (Flashback-Studio's converter and 3DS app) decode it.
 
 #define FLASHBACK_PACK_RUN_MAX  62
 #define FLASHBACK_PACK_RAW      0xFE
@@ -429,75 +420,6 @@ static u32 flashbackCompress(const u16 *src, u32 pixels, u8 *dst, u32 cap)
         *out++ = 0xC0 | (run - 1);
     }
     return (u32)(out - dst);
-}
-
-// Decompresses exactly 'pixels' pixels from exactly 'len' bytes. Returns false
-// if the data is malformed (never writes past 'dst' + 'pixels').
-static bool flashbackDecompress(const u8 *src, u32 len, u16 *dst, u32 pixels)
-{
-    u16 index[64];
-    memset(index, 0, sizeof(index));
-    u16 px = 0;
-    const u8 *p = src, *end = src + len;
-    u32 i = 0;
-
-    while (i < pixels)
-    {
-        if (p >= end)
-            return false;
-        u8 b = *p++;
-
-        if (b == FLASHBACK_PACK_RAW)
-        {
-            if (end - p < 2)
-                return false;
-            px = p[0] | (p[1] << 8);
-            p += 2;
-        }
-        else if ((b & 0xC0) == 0xC0)
-        {
-            u32 run = (b & 0x3F) + 1;
-            if (run > pixels - i)
-                return false;
-            while (run-- != 0)
-                dst[i++] = px;
-            continue;
-        }
-        else if ((b & 0xC0) == 0x00)
-        {
-            px = index[b];
-            dst[i++] = px;
-            continue;
-        }
-        else
-        {
-            s32 dr, dg, db;
-            if ((b & 0xC0) == 0x40)
-            {
-                dr = ((b >> 4) & 3) - 2;
-                dg = ((b >> 2) & 3) - 2;
-                db = (b & 3) - 2;
-            }
-            else
-            {
-                if (p >= end)
-                    return false;
-                u8 b2 = *p++;
-                dg = (b & 0x3F) - 32;
-                dr = ((b2 >> 4) - 8) + (dg >> 1);
-                db = ((b2 & 0xF) - 8) + (dg >> 1);
-            }
-            u32 r = ((px >> 11) + dr) & 0x1F;
-            u32 g = (((px >> 5) & 0x3F) + dg) & 0x3F;
-            u32 bl = ((px & 0x1F) + db) & 0x1F;
-            px = (u16)((r << 11) | (g << 5) | bl);
-        }
-
-        index[flashbackPackHash(px)] = px;
-        dst[i++] = px;
-    }
-
-    return p == end;
 }
 
 static bool flashbackIsSdMode(void)
@@ -1142,7 +1064,7 @@ static bool flashbackRecordFrame(void)
 
     u32 slot = g_stageProduced % FLASHBACK_STAGE_SLOTS;   // the oldest free staging slot
     u8 *stage = g_mem + slot * g_slotStride;
-    u16 *frame = (u16 *)(g_mem + g_bmpOffset);  // capture buffer (only saves use it otherwise)
+    u16 *frame = (u16 *)(g_mem + g_frameOffset);    // capture buffer (only saves use it otherwise)
 
     // Where the audio is as the frame is captured (taken after the capture and
     // compression, it put the audio up to ~20 ms early in the clip).
@@ -1200,42 +1122,6 @@ static void flashbackFillMissed(u32 missed)
 // Export
 // ---------------------------------------------------------------------------
 
-static inline void flashbackPut16(u8 *p, u16 v) { p[0] = (u8)v; p[1] = (u8)(v >> 8); }
-static inline void flashbackPut32(u8 *p, u32 v)
-{
-    p[0] = (u8)v; p[1] = (u8)(v >> 8); p[2] = (u8)(v >> 16); p[3] = (u8)(v >> 24);
-}
-
-// Converts one upright RGB565 frame into a complete 16-bit RGB565 BMP
-// (BI_BITFIELDS). Lossless: frames are already RGB565, so this is just a header
-// and the rows in bottom-up order.
-static void flashbackEncodeBmp(const u16 *src, u8 *out)
-{
-    const u32 rowBytes = g_w * 2;               // 400 or 800: already a multiple of 4
-    const u32 pixBytes = rowBytes * g_h;
-
-    memset(out, 0, FLASHBACK_BMP_HEADER);
-    out[0] = 'B'; out[1] = 'M';
-    flashbackPut32(out + 2,  FLASHBACK_BMP_HEADER + pixBytes); // file size
-    flashbackPut32(out + 10, FLASHBACK_BMP_HEADER);            // pixel data offset
-    flashbackPut32(out + 14, 40);               // BITMAPINFOHEADER size
-    flashbackPut32(out + 18, g_w);
-    flashbackPut32(out + 22, g_h);              // positive height = rows stored bottom-up
-    flashbackPut16(out + 26, 1);                // planes
-    flashbackPut16(out + 28, 16);               // bits per pixel
-    flashbackPut32(out + 30, 3);                // BI_BITFIELDS
-    flashbackPut32(out + 34, pixBytes);
-    flashbackPut32(out + 38, 2835);             // ~72 dpi
-    flashbackPut32(out + 42, 2835);
-    flashbackPut32(out + 54, 0xF800);           // red mask
-    flashbackPut32(out + 58, 0x07E0);           // green mask
-    flashbackPut32(out + 62, 0x001F);           // blue mask
-
-    u8 *dst = out + FLASHBACK_BMP_HEADER;
-    for (u32 y = g_h; y-- > 0; dst += rowBytes) // bottom row first
-        memcpy(dst, src + y * g_w, rowBytes);
-}
-
 // Which ring slots make up a clip of the chosen length, oldest first,
 // with each slot repeated 1 + g_repeat[] times to fill missed frames.
 typedef struct FlashbackClipPlan {
@@ -1270,86 +1156,6 @@ static inline u32 flashbackPlanSlot(const FlashbackClipPlan *plan, u32 i, u32 *c
     return idx;
 }
 
-// Reads 'count' ring slots starting at 'idx' (which must not wrap) as
-// uncompressed frames, g_slotBytes apart, into 'dst'. Only each slot's actual
-// contents are read; compressed ones go through the scratch buffer (free while
-// saving) and are decompressed into place.
-static bool flashbackReadSlots(u32 idx, u32 count, u8 *dst)
-{
-    u8 *scratch = g_mem + g_bmpOffset;
-
-    for (u32 i = 0; i < count; i++)
-    {
-        u64 total;
-        u32 len = g_slotLen[idx + i];
-        u8 *frame = dst + i * g_slotBytes;
-        bool packed = len < g_slotBytes;
-
-        g_ring.pos = g_audioBytes + (u64)(idx + i) * g_slotStride;
-        if (R_FAILED(IFile_Read(&g_ring, &total, packed ? scratch : frame, len)) || total != len)
-            return false;
-        if (packed && !flashbackDecompress(scratch, len, (u16 *)frame, g_w * g_h))
-            return false;
-    }
-    return true;
-}
-
-// How many plan slots starting at 'i' sit next to each other in the ring file
-// (i.e. stop where the ring wraps), at most 'max'.
-static u32 flashbackContiguousSlots(const FlashbackClipPlan *plan, u32 i, u32 max)
-{
-    u32 copies;
-    u32 idx0 = flashbackPlanSlot(plan, i, &copies);
-    u32 k = 1;
-    while (k < max && i + k < plan->slots && idx0 + k < g_frames)
-        k++;
-    return k;
-}
-
-// Temporary buffer used only while saving, so reads and writes can move many
-// frames per SD request. Taken from the SYSTEM region and freed right after.
-#define FLASHBACK_SAVE_BUF_ADDR 0x0DA00000
-#define FLASHBACK_SAVE_BUF_MAX  (1024 * 1024)
-
-typedef struct FlashbackSaveBuffer {
-    u8 *data;
-    u32 frames;     // capacity in frames
-    u32 allocSize;  // 0 if we're using the recorder's own staging slots
-} FlashbackSaveBuffer;
-
-// Needs the staging slots to be idle (flashbackDrainWrites), which they are
-// during a save. A separate buffer is only borrowed when it's meaningfully
-// bigger than the staging slots (at half resolution); at full resolution the
-// staging slots are used directly, keeping peak memory use down.
-static FlashbackSaveBuffer flashbackAllocSaveBuffer(void)
-{
-    FlashbackSaveBuffer buf = { g_mem, FLASHBACK_STAGE_SLOTS, 0 };
-    u32 tmp;
-
-    for (u32 frames = FLASHBACK_SAVE_BUF_MAX / g_slotBytes; frames > 2 * FLASHBACK_STAGE_SLOTS; frames /= 2)
-    {
-        u32 size = (frames * g_slotBytes + 0xFFF) & ~0xFFF;
-        if (R_SUCCEEDED(svcControlMemoryEx(&tmp, FLASHBACK_SAVE_BUF_ADDR, 0, size,
-                                           MEMOP_ALLOC | MEMOP_REGION_SYSTEM, MEMPERM_READWRITE, true)))
-        {
-            buf.data = (u8 *)FLASHBACK_SAVE_BUF_ADDR;
-            buf.frames = frames;
-            buf.allocSize = size;
-            break;
-        }
-    }
-
-    return buf;
-}
-
-static void flashbackFreeSaveBuffer(FlashbackSaveBuffer *buf)
-{
-    u32 tmp;
-    if (buf->allocSize != 0)
-        svcControlMemory(&tmp, FLASHBACK_SAVE_BUF_ADDR, 0, buf->allocSize, MEMOP_FREE, 0);
-    buf->allocSize = 0;
-}
-
 // The oldest audio frame the ring still holds: all but the oldest chunk, which
 // a partly written chunk (see flashbackWriteAudio) may have overwritten.
 static u32 flashbackAudioOldest(void)
@@ -1374,124 +1180,6 @@ static u32 flashbackAudioSampleOf(u32 frame)
 {
     u32 base = flashbackAudioBase();
     return frame > base ? (frame - base) * FLASHBACK_AUDIO_FRAME_SAMPLES : 0;
-}
-
-// Reads audio samples first .. first + count - 1 (saved positions) from the
-// audio ring into 'dst' (stereo PCM16); samples the ring doesn't hold (any
-// more, or yet) are silence.
-static bool flashbackReadAudio(u32 first, u32 count, u8 *dst)
-{
-    u32 cap = g_audioCapFrames * FLASHBACK_AUDIO_FRAME_SAMPLES;
-    u32 end = flashbackAudioSampleOf(g_audioFlushed);
-    u32 oldest = flashbackAudioSampleOf(flashbackAudioOldest());
-
-    memset(dst, 0, count * 4);
-    u32 a = first < oldest ? oldest : first;
-    u32 b = first + count < end ? first + count : end;
-    while (a < b)
-    {
-        u64 total;
-        u32 pos = a % cap;
-        u32 n = b - a < cap - pos ? b - a : cap - pos;
-        g_ring.pos = (u64)pos * 4;
-        if (R_FAILED(IFile_Read(&g_ring, &total, dst + (a - first) * 4, n * 4)) || total != n * 4)
-            return false;
-        a += n;
-    }
-    return true;
-}
-
-// With BMP frames, the clip's audio goes in <clip>/audio.wav.
-static bool flashbackSaveWav(FS_Archive archive, const char *clip, const FlashbackClipPlan *plan, u8 *buf, u32 bufBytes)
-{
-    u32 copies;
-    u32 idx = flashbackPlanSlot(plan, 0, &copies);
-    u32 first = flashbackAudioSampleOf(g_slotAudioFrame[idx]) + flashbackAudioSamplesFor(plan->trimFirst);
-    u32 count = flashbackAudioSamplesFor(plan->frames);
-    u32 rate = FLASHBACK_AUDIO_RATE_MHZ / 1000;
-    char path[128];
-    IFile file = {0};
-    u64 total;
-
-    sprintf(path, "%s/audio.wav", clip);
-    if (R_FAILED(IFile_OpenFromArchive(&file, archive, fsMakePath(PATH_ASCII, path), FS_OPEN_CREATE | FS_OPEN_WRITE)))
-        return false;
-
-    u8 header[44];
-    memcpy(header, "RIFF", 4);
-    flashbackPut32(header + 4, 36 + count * 4);
-    memcpy(header + 8, "WAVEfmt ", 8);
-    flashbackPut32(header + 16, 16);
-    flashbackPut16(header + 20, 1);             // PCM
-    flashbackPut16(header + 22, 2);             // stereo
-    flashbackPut32(header + 24, rate);
-    flashbackPut32(header + 28, rate * 4);      // bytes per second
-    flashbackPut16(header + 32, 4);             // bytes per sample frame
-    flashbackPut16(header + 34, 16);            // bits per sample
-    memcpy(header + 36, "data", 4);
-    flashbackPut32(header + 40, count * 4);
-
-    bool ok = R_SUCCEEDED(IFile_Write(&file, &total, header, sizeof(header), 0)) && total == sizeof(header);
-    u32 perRead = bufBytes / 4;
-    for (u32 done = 0; ok && done < count; )
-    {
-        u32 n = count - done < perRead ? count - done : perRead;
-        ok = flashbackReadAudio(first + done, n, buf) &&
-             R_SUCCEEDED(IFile_Write(&file, &total, buf, n * 4, 0)) && total == n * 4;
-        done += n;
-    }
-    IFile_Close(&file);
-    return ok;
-}
-
-// BMP format: <clip>/frame_000.bmp, frame_001.bmp, ... (and audio.wav with
-// audio). Frames are read from the ring in batches; each BMP is still its own file.
-static s32 flashbackSaveBmp(FS_Archive archive, const char *clip, const FlashbackClipPlan *plan)
-{
-    u8 *bmp = g_mem + g_bmpOffset;
-    char path[128];
-    s32 written = 0;
-
-    if (R_FAILED(flashbackCreateDirectory(archive, clip)))
-        return -2;
-
-    FlashbackSaveBuffer buf = flashbackAllocSaveBuffer();
-
-    for (u32 i = 0; i < plan->slots; )
-    {
-        u32 copies;
-        u32 idx = flashbackPlanSlot(plan, i, &copies);
-        u32 k = flashbackContiguousSlots(plan, i, buf.frames);
-        if (!flashbackReadSlots(idx, k, buf.data))
-            goto end;
-
-        for (u32 j = 0; j < k; j++, i++)
-        {
-            flashbackPlanSlot(plan, i, &copies);
-            flashbackEncodeBmp((const u16 *)(buf.data + j * g_slotBytes), bmp);
-
-            for (u32 c = 0; c < copies; c++)
-            {
-                u64 total;
-                IFile file = {0};
-                sprintf(path, "%s/frame_%03ld.bmp", clip, written);
-                if (R_FAILED(IFile_OpenFromArchive(&file, archive, fsMakePath(PATH_ASCII, path), FS_OPEN_CREATE | FS_OPEN_WRITE)))
-                    goto end;
-                Result res = IFile_Write(&file, &total, bmp, g_bmpBytes, 0);
-                IFile_Close(&file);
-                if (R_FAILED(res) || total != g_bmpBytes)
-                    goto end;
-                written++;
-            }
-        }
-    }
-
-    if (g_audio)
-        flashbackSaveWav(archive, clip, plan, buf.data, buf.frames * g_slotBytes);
-
-end:
-    flashbackFreeSaveBuffer(&buf);
-    return written;
 }
 
 // Clip file format (<clip>.flb): the ring file itself, renamed, with an index
@@ -1609,6 +1297,10 @@ static u32 flashbackBuildClipIndex(const FlashbackClipPlan *plan, u32 indexOffse
     return (u32)((u8 *)(t + 1) - buf);
 }
 
+// The clip's index is built in the capture buffer, a frame's size.
+_Static_assert(FLASHBACK_MAX_FRAMES * 16 + sizeof(FlashbackClipAudioInfo) + sizeof(FlashbackClipTrailer) <= 200 * 120 * 2,
+               "a clip's index fits in the capture buffer at half resolution");
+
 // Saves the clip by turning the ring file into it, then starts a fresh ring.
 // Needs the writer to be idle (flashbackDrainWrites).
 static s32 flashbackSaveClipFile(FS_Archive archive, const char *clip, const FlashbackClipPlan *plan)
@@ -1621,7 +1313,7 @@ static s32 flashbackSaveClipFile(FS_Archive archive, const char *clip, const Fla
     // The ring always starts at slot 0, so until it has wrapped once the clip
     // only uses its first g_count slots: the rest can be trimmed off.
     u32 dataEnd = g_audioBytes + (g_count < g_frames ? g_count : g_frames) * g_slotStride;
-    u8 *index = g_mem + g_bmpOffset;    // scratch buffer, free while saving
+    u8 *index = g_mem + g_frameOffset;  // the capture buffer, free while saving
     u32 indexSize = flashbackBuildClipIndex(plan, dataEnd, index);
 
     IFile_Close(&g_ring);
@@ -1660,16 +1352,16 @@ static s32 flashbackSaveClipFile(FS_Archive archive, const char *clip, const Fla
     return result;
 }
 
-// Returns the number of frames written, or a negative value:
-//   -1 nothing recorded, -2 couldn't create the clip file/directory, -3 couldn't write any frame.
+// Returns the number of frames saved, or a negative value:
+//   -1 nothing recorded, -2 couldn't create the clip file, -3 couldn't write the clip's index.
 static s32 flashbackSave(void)
 {
     if (!g_active || g_count == 0)
         return -1;
 
     // Frames and audio still waiting to be written belong at the end of the
-    // clip, and the save reads the ring file and reuses the staging slots.
-    // (Audio capture resumes along with recording, once the save is done.)
+    // clip, and the writer must be done with the ring file before it becomes
+    // the clip. (Audio capture resumes along with recording, once the save is done.)
     flashbackAudioPause();
     flashbackDrainWrites();
 
@@ -1690,17 +1382,12 @@ static s32 flashbackSave(void)
     sprintf(clip, FLASHBACK_DIR "/%s", clipName);
 
     FlashbackClipPlan plan = flashbackPlanClip();
-    g_lastSaveExpected = plan.frames;
-    bool clipFile = g_saveFormat == FLASHBACK_FORMAT_CLIP;
-    s32 written = clipFile ? flashbackSaveClipFile(archive, clip, &plan) : flashbackSaveBmp(archive, clip, &plan);
-
-    if (written == 0 && !clipFile)
-        FSUSER_DeleteDirectory(archive, fsMakePath(PATH_ASCII, clip)); // empty clip folder
+    s32 result = flashbackSaveClipFile(archive, clip, &plan);
 
     FSUSER_CloseArchive(archive);
-    if (written > 0)
-        sprintf(g_lastClip, "%s%s", clip, clipFile ? ".flb" : "/");
-    return written != 0 ? written : -3;
+    if (result > 0)
+        sprintf(g_lastClip, "%s.flb", clip);
+    return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -1721,7 +1408,7 @@ typedef struct FlashbackSettings {
     u8  enabled;        // unused (always 0): recording is always off at boot
     u8  res;            // FlashbackResolution
     u8  fpsIdx;         // index into g_fpsChoices
-    u8  format;         // FlashbackFormat
+    u8  format;         // unused (always 0): was the save format, when BMP frames were one
     u32 saveCombo;
     // Version 2 and later:
     u8  length;         // clip length in seconds (version 2: index into { 5, 10, ..., 30 })
@@ -1753,7 +1440,6 @@ static FlashbackSettings flashbackCurrentSettings(void)
     s.enabled = 0;      // not remembered, so toggling recording doesn't rewrite the file
     s.res = (u8)g_wantRes;
     s.fpsIdx = (u8)g_wantFpsIdx;
-    s.format = (u8)g_saveFormat;
     s.saveCombo = g_saveCombo;
     s.length = (u8)g_lengthChoices[g_wantLenIdx];
     s.audio = g_wantAudio ? 1 : 0;
@@ -1800,8 +1486,6 @@ static void flashbackLoadSettings(void)
         g_wantFpsIdx = s.fpsIdx;
     if (s.version >= 4 && total >= sizeof(s))
         g_wantAudio = s.audio != 0;     // (older files: the default, on)
-    if (s.format < FLASHBACK_FORMAT_COUNT)
-        g_saveFormat = s.format;
     // Re-checked in case the Rosalina menu combo was changed since.
     if (flashbackCheckCombo(s.saveCombo) == NULL)
         g_saveCombo = s.saveCombo;
@@ -1956,10 +1640,9 @@ static void flashbackThreadMain(void)
             {
                 // Skip the result flash if a menu was opened mid-save: the
                 // tint would color the menu instead of the game.
-                bool complete = res > 0 && (u32)res == g_lastSaveExpected;
                 if (!menuIsOpen())
                 {
-                    flashbackSetTint(complete ? FLASHBACK_TINT_OK : FLASHBACK_TINT_FAILED);
+                    flashbackSetTint(res > 0 ? FLASHBACK_TINT_OK : FLASHBACK_TINT_FAILED);
                     svcSleepThread(300 * 1000 * 1000LL);
                 }
                 flashbackClearTint();
@@ -2208,16 +1891,12 @@ void FlashbackMenu_Show(void)
         posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Recording:  %s\n", g_enabled ? "on" : "off");
         posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Resolution: %s\n",
                                         res == FLASHBACK_RES_FULL ? "full (400x240)" : "half (200x120)");
-        // Size of a saved clip of the full length: a .flb is the ring file
-        // (frames rounded up to whole SD sectors, and the audio ring), BMPs are
-        // frames plus headers (and a WAV).
+        // Size of a saved clip of the full length: the ring file (frames
+        // rounded up to whole SD sectors, and the audio ring).
         u32 frameBytes = (res == FLASHBACK_RES_FULL ? 400 * 240 : 200 * 120) * 2;
-        u32 perFrame = g_saveFormat == FLASHBACK_FORMAT_CLIP ? (frameBytes + 511) & ~511 : frameBytes + FLASHBACK_BMP_HEADER;
-        u64 clipBytes = (u64)frames * perFrame;
-        if (audio && g_saveFormat == FLASHBACK_FORMAT_CLIP)
+        u64 clipBytes = (u64)frames * ((frameBytes + 511) & ~511);
+        if (audio)
             clipBytes += (u64)flashbackAudioFramesFor(seconds) * FLASHBACK_AUDIO_FRAME_BYTES;
-        else if (audio)
-            clipBytes += (u64)seconds * FLASHBACK_AUDIO_RATE_MHZ / 1000 * 4;
         u32 clipTenthsMb = (u32)((clipBytes + 50000) / 100000);     // in tenths of a MB (1 MB = 1,000,000 bytes)
 
         if (clipTenthsMb < 100)
@@ -2226,9 +1905,7 @@ void FlashbackMenu_Show(void)
         else
             posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Frame rate: %lu fps   Length: %lu s (%lu MB)\n",
                                             fps, seconds, (clipTenthsMb + 5) / 10);
-        // (One line for both: the screen has no room for another.)
-        posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Format:     %s   Audio: %s\n\n",
-                                        g_saveFormat == FLASHBACK_FORMAT_CLIP ? "clip file (.flb, fast)" : "BMP frames (slow)",
+        posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Audio:      %s\n\n",
                                         !g_audioRunning ? "failed" : g_wantAudio ? "on" : "off");
 
         // Counted the same way a save would be: frame times in the clip, and
@@ -2261,9 +1938,6 @@ void FlashbackMenu_Show(void)
             posY = Draw_DrawString(10, posY, COLOR_WHITE, "Saving...\n");
         else if (recordError != NULL)
             posY = Draw_DrawFormattedString(10, posY, COLOR_RED, "%s\n", recordError);
-        else if (g_lastSaveResult > 0 && (u32)g_lastSaveResult < g_lastSaveExpected)
-            posY = Draw_DrawFormattedString(10, posY, COLOR_RED, "Incomplete: saved %ld of %lu frames to\n%s\n",
-                                            g_lastSaveResult, g_lastSaveExpected, g_lastClip);
         else if (g_lastSaveResult > 0)
             posY = Draw_DrawFormattedString(10, posY, COLOR_GREEN, "Saved %ld frames in %lu.%lus to\n%s\n", g_lastSaveResult,
                                             g_lastSaveMs / 1000, (g_lastSaveMs / 100) % 10, g_lastClip);
@@ -2273,7 +1947,7 @@ void FlashbackMenu_Show(void)
         posY += 10;
         posY = Draw_DrawString(10, posY, COLOR_WHITE, "A: recording on/off   X: save clip now   B: back\n");
         posY = Draw_DrawString(10, posY, COLOR_WHITE, "Y: resolution   Left/Right: fps   L/R: length\n");
-        posY = Draw_DrawString(10, posY, COLOR_WHITE, "Up/Down: format   Start: audio   Select: hotkey\n");
+        posY = Draw_DrawString(10, posY, COLOR_WHITE, "Start: audio   Select: hotkey\n");
         posY = Draw_DrawString(10, posY, COLOR_WHITE, "Off or res/fps/length/audio clear the buffer.\n\n");
         LumaConfig_ConvertComboToString(comboStr, g_saveCombo);
         Draw_DrawFormattedString(10, posY, COLOR_WHITE, "In game: %s saves a clip.", comboStr);
@@ -2300,8 +1974,6 @@ void FlashbackMenu_Show(void)
             g_wantFpsIdx = (g_wantFpsIdx + 1) % FLASHBACK_FPS_CHOICES;
         else if ((pressed & KEY_DLEFT) && !busy)
             g_wantFpsIdx = (g_wantFpsIdx + FLASHBACK_FPS_CHOICES - 1) % FLASHBACK_FPS_CHOICES;
-        else if ((pressed & (KEY_DUP | KEY_DDOWN)) && !busy)
-            g_saveFormat = (g_saveFormat + 1) % FLASHBACK_FORMAT_COUNT;
         else if ((pressed & KEY_R) && !busy && g_wantLenIdx + 1 < FLASHBACK_LENGTH_CHOICES)
             g_wantLenIdx = g_wantLenIdx + 1;    // longer (stops at the longest)
         else if ((pressed & KEY_L) && !busy && g_wantLenIdx > 0)
