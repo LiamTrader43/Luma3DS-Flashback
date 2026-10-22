@@ -211,22 +211,30 @@ static bool g_audioRunning;                 // the audio thread exists
 // resolution at 30 fps needs uncompressed (5.8 MB/s); compression is what
 // closes that gap. (Batching several frames per SD request was tried and
 // didn't help: the time is in moving the bytes, not in each request.)
-#define FLASHBACK_STAGE_SLOTS   4
+//
+// The card also pauses now and then (single writes of 100-200 ms on an Old 3DS,
+// where the average write is barely under a frame's time), and every frame
+// captured meanwhile waits in a slot. So there are as many slots as there's
+// memory for, up to FLASHBACK_STAGE_SLOTS_MAX (~3 MB at full resolution): an
+// Old 3DS in Mario Kart 7 dropped ~50 frames in 30 s with 4 slots, waiting on
+// the card, and none with 16. Always a power of two (see below).
+#define FLASHBACK_STAGE_SLOTS_MAX   16
+#define FLASHBACK_STAGE_SLOTS_MIN   4
 
 // Staging slots are used in order: frame number p (counting every frame ever
-// staged) goes to staging slot p % FLASHBACK_STAGE_SLOTS, independent of its
-// ring slot (stored next to it), so any ring size works.
-// g_stageProduced - g_stageConsumed frames are waiting, oldest first, starting
-// at staging slot g_stageConsumed % FLASHBACK_STAGE_SLOTS. Both counters only
-// ever increase.
-static u32 g_stageRingIdx[FLASHBACK_STAGE_SLOTS];  // ring slot of each staged frame
-static u32 g_stageLen[FLASHBACK_STAGE_SLOTS];      // bytes to write for each staged frame
+// staged) goes to staging slot p % g_stageSlots, independent of its ring slot
+// (stored next to it), so any ring size works. g_stageProduced -
+// g_stageConsumed frames are waiting, oldest first, starting at staging slot
+// g_stageConsumed % g_stageSlots. Both counters only ever increase (and stay
+// in step with the slots when they wrap, g_stageSlots being a power of two).
+static u32 g_stageSlots;                // staging slots in use (flashbackStart)
+static u32 g_stageRingIdx[FLASHBACK_STAGE_SLOTS_MAX];  // ring slot of each staged frame
+static u32 g_stageLen[FLASHBACK_STAGE_SLOTS_MAX];      // bytes to write for each staged frame
 static volatile u32 g_stageProduced;    // frames staged (capture thread)
 static volatile u32 g_stageConsumed;    // frames written or given up on (writer thread)
 static volatile bool g_writeFailed;     // a ring write failed (writer -> capture thread)
 static bool g_ringLost;                 // a save couldn't reopen/recreate the ring file
 static LightEvent g_writeEvent;         // signaled when a frame is staged
-static u64 g_lastFrameTicks;            // how long the last frame took to capture and compress
 
 static MyThread flashbackWriterThread;
 static u8 CTR_ALIGN(8) flashbackWriterStack[0x1000];
@@ -255,6 +263,21 @@ static u32 flashbackAudioFramesFor(u32 seconds)
     return (frames + FLASHBACK_AUDIO_CHUNK_FRAMES - 1) / FLASHBACK_AUDIO_CHUNK_FRAMES * FLASHBACK_AUDIO_CHUNK_FRAMES;
 }
 
+// Where things are in the recorder's memory, for g_stageSlots staging slots and
+// g_audioStageFrames of audio staging: the staging slots first, then a buffer
+// that holds the frame being captured (before compression) while recording, or
+// the clip's index while saving (the two never overlap in time), and a column's
+// worth after it that compressing reads past the frame (flashbackCompress),
+// then the audio staging.
+static void flashbackLayout(void)
+{
+    g_frameOffset = (g_stageSlots * g_slotStride + 0xFFF) & ~0xFFF;
+    g_memSize = (g_frameOffset + g_slotBytes + g_h * 2 + 0xFFF) & ~0xFFF;
+    g_audioStageOffset = g_memSize;
+    if (g_audio)
+        g_memSize += (g_audioStageFrames * FLASHBACK_AUDIO_FRAME_BYTES + 0xFFF) & ~0xFFF;
+}
+
 static void flashbackApplyFormat(u32 res, u32 fpsIdx, u32 lenIdx, bool audio)
 {
     g_res = res;
@@ -271,22 +294,17 @@ static void flashbackApplyFormat(u32 res, u32 fpsIdx, u32 lenIdx, bool audio)
     // 48000 bytes, otherwise don't), so writes never need the card to read
     // and rewrite a partially covered sector.
     g_slotStride = (g_slotBytes + 511) & ~511;
-    // Staging slots first, then a buffer that holds the frame being captured
-    // (before compression) while recording, or the clip's index while saving
-    // (the two never overlap in time), and a column's worth after it that
-    // compressing reads past the frame (flashbackCompress).
-    g_frameOffset = (FLASHBACK_STAGE_SLOTS * g_slotStride + 0xFFF) & ~0xFFF;
-    g_memSize = (g_frameOffset + g_slotBytes + g_h * 2 + 0xFFF) & ~0xFFF;
 
     // Audio: a ring at the start of the ring file (a whole number of chunks,
     // so the video slots after it stay sector-aligned), and staging memory.
     g_audio = audio;
     g_audioCapFrames = audio ? flashbackAudioFramesFor(g_lengthChoices[lenIdx]) : 0;
     g_audioBytes = g_audioCapFrames * FLASHBACK_AUDIO_FRAME_BYTES;
-    g_audioStageOffset = g_memSize;
+
+    // (flashbackStart settles how much memory there is for staging.)
+    g_stageSlots = FLASHBACK_STAGE_SLOTS_MAX;
     g_audioStageFrames = FLASHBACK_AUDIO_STAGE_FRAMES;
-    if (audio)
-        g_memSize += (g_audioStageFrames * FLASHBACK_AUDIO_FRAME_BYTES + 0xFFF) & ~0xFFF;
+    flashbackLayout();
 }
 
 static void flashbackResetStats(void)
@@ -571,8 +589,8 @@ typedef struct FlashbackCaptureArgs {
 // retry never reads lines cached by the previous attempt.
 #define FLASHBACK_CAPTURE_ATTEMPTS  3
 
-// -O2 for the conversion too, like compression (BGR8 frames convert ~11%
-// faster on an Old 3DS; the other formats are unchanged).
+// -O2 for the C conversion too, like compression (half resolution and the rare
+// formats: see flashbackConvert; BGR8 frames convert ~11% faster on an Old 3DS).
 #pragma GCC push_options
 #pragma GCC optimize ("O2")
 
@@ -643,6 +661,44 @@ static inline __attribute__((always_inline)) void flashbackConvertFrame(
     }
 }
 
+// flashback_capture.s: flashbackConvertFrame at full resolution (every
+// framebuffer row) in the common formats: 'cols' columns of 240 pixels, one
+// after the other ('skip' bytes from the end of one to the start of the next),
+// into 'dst' in the same order. 'src', 'skip' and 'dst' must be multiples of 4
+// (it loads and stores whole words).
+void flashbackConvertRgba8(const u8 *src, u16 *dst, u32 cols, u32 skip);
+void flashbackConvertBgr8(const u8 *src, u16 *dst, u32 cols, u32 skip);
+void flashbackConvertRgb565(const u8 *src, u16 *dst, u32 cols, u32 skip);
+
+// Converts the frame as flashbackConvertFrame does, with flashback_capture.s
+// where it can: full resolution in RGBA8, BGR8 and RGB565, about twice as fast
+// on an Old 3DS (RGBA8: 2.8 ms instead of 5.1), which also halves how long the
+// capture holds up everything else on this core, the game's threads included.
+static void flashbackConvert(const FlashbackCaptureArgs *args, const u8 *fb, u32 stride, u32 stepX, u32 stepY,
+                             u32 fmt, u32 bpp)
+{
+    u32 colStep = stepX * stride;
+    if (args->outH == 240 && stepY == 1 && colStep >= 240 * bpp &&
+        (((u32)fb | colStep | (u32)args->dst) & 3) == 0)
+    {
+        switch (fmt)
+        {
+            case GSP_RGBA8_OES:  flashbackConvertRgba8(fb, args->dst, args->outW, colStep - 240 * 4); return;
+            case GSP_BGR8_OES:   flashbackConvertBgr8(fb, args->dst, args->outW, colStep - 240 * 3); return;
+            case GSP_RGB565_OES: flashbackConvertRgb565(fb, args->dst, args->outW, colStep - 240 * 2); return;
+        }
+    }
+
+    switch (fmt)
+    {
+        case GSP_RGBA8_OES:   flashbackConvertFrame(args, fb, stride, stepX, stepY, GSP_RGBA8_OES, 4); break;
+        case GSP_BGR8_OES:    flashbackConvertFrame(args, fb, stride, stepX, stepY, GSP_BGR8_OES, 3); break;
+        case GSP_RGB565_OES:  flashbackConvertFrame(args, fb, stride, stepX, stepY, GSP_RGB565_OES, 2); break;
+        case GSP_RGB5_A1_OES: flashbackConvertFrame(args, fb, stride, stepX, stepY, GSP_RGB5_A1_OES, 2); break;
+        case GSP_RGBA4_OES:   flashbackConvertFrame(args, fb, stride, stepX, stepY, GSP_RGBA4_OES, 2); break;
+    }
+}
+
 static inline u32 flashbackCurrentTopFramebuffer(void)
 {
     return (GPU_FB_TOP_SEL & 1) ? GPU_FB_TOP_LEFT_ADDR_2 : GPU_FB_TOP_LEFT_ADDR_1;
@@ -679,15 +735,7 @@ static void flashbackCaptureKernel(FlashbackCaptureArgs *args)
     u32 stepY = 240 / args->outH;
 
     const u8 *fb = (const u8 *)(pa + args->kernPaToVa);
-    switch (fmt)
-    {
-        case GSP_RGBA8_OES:   flashbackConvertFrame(args, fb, stride, stepX, stepY, GSP_RGBA8_OES, 4); break;
-        case GSP_BGR8_OES:    flashbackConvertFrame(args, fb, stride, stepX, stepY, GSP_BGR8_OES, 3); break;
-        case GSP_RGB565_OES:  flashbackConvertFrame(args, fb, stride, stepX, stepY, GSP_RGB565_OES, 2); break;
-        case GSP_RGB5_A1_OES: flashbackConvertFrame(args, fb, stride, stepX, stepY, GSP_RGB5_A1_OES, 2); break;
-        case GSP_RGBA4_OES:   flashbackConvertFrame(args, fb, stride, stepX, stepY, GSP_RGBA4_OES, 2); break;
-        default: return;
-    }
+    flashbackConvert(args, fb, stride, stepX, stepY, fmt, bpp);     // (bpp != 0: a valid format)
 
     // If the game swapped buffers mid-read, the buffer we were reading may
     // already be getting overwritten with the next frame.
@@ -808,7 +856,7 @@ static void flashbackWritePending(void)
             return;
         __sync_synchronize();   // see the staged frame, its ring slot and size before using them
 
-        u32 slot = consumed % FLASHBACK_STAGE_SLOTS;
+        u32 slot = consumed % g_stageSlots;
 
         // After a failure, frames are only discarded, so the capture thread
         // can stop recording without waiting on a broken card.
@@ -1134,18 +1182,24 @@ static Result flashbackStart(void)
 
     flashbackAudioPause();
 
-    res = svcControlMemoryEx(&tmp, FLASHBACK_MEM_ADDR, 0, g_memSize,
-                             MEMOP_ALLOC | MEMOP_REGION_SYSTEM, MEMPERM_READWRITE, true);
-    if (R_FAILED(res) && g_audio && g_audioStageFrames > FLASHBACK_AUDIO_STAGE_FRAMES_MIN)
+    // As many staging slots as there's memory for (halving down to the
+    // fewest), and short of memory even then, less audio staging.
+    g_stageSlots = FLASHBACK_STAGE_SLOTS_MAX;
+    g_audioStageFrames = FLASHBACK_AUDIO_STAGE_FRAMES;
+    for (;;)
     {
-        // Not enough memory for the full audio staging: make do with less.
-        g_audioStageFrames = FLASHBACK_AUDIO_STAGE_FRAMES_MIN;
-        g_memSize = g_audioStageOffset + ((g_audioStageFrames * FLASHBACK_AUDIO_FRAME_BYTES + 0xFFF) & ~0xFFF);
+        flashbackLayout();
         res = svcControlMemoryEx(&tmp, FLASHBACK_MEM_ADDR, 0, g_memSize,
                                  MEMOP_ALLOC | MEMOP_REGION_SYSTEM, MEMPERM_READWRITE, true);
+        if (R_SUCCEEDED(res))
+            break;
+        if (g_stageSlots > FLASHBACK_STAGE_SLOTS_MIN)
+            g_stageSlots /= 2;
+        else if (g_audio && g_audioStageFrames > FLASHBACK_AUDIO_STAGE_FRAMES_MIN)
+            g_audioStageFrames = FLASHBACK_AUDIO_STAGE_FRAMES_MIN;
+        else
+            return res;
     }
-    if (R_FAILED(res))
-        return res;
     g_mem = (u8 *)FLASHBACK_MEM_ADDR;
 
     res = FSUSER_OpenArchive(&archive, ARCHIVE_SDMC, fsMakePath(PATH_EMPTY, ""));
@@ -1191,15 +1245,16 @@ static void flashbackStop(void)
 }
 
 // Captures and compresses a frame into the next staging slot and hands it to
-// the writer. Returns false if no frame was recorded this tick (capture failed,
-// or every staging slot is still waiting to be written because the SD card is
-// behind).
-static bool flashbackRecordFrame(void)
+// the writer. 'lateTicks' is how late it's being recorded: how long after its
+// grid slot started. Returns false if no frame was recorded this tick (capture
+// failed, or every staging slot is still waiting to be written because the SD
+// card is behind).
+static bool flashbackRecordFrame(u64 lateTicks)
 {
-    if (g_stageProduced - g_stageConsumed >= FLASHBACK_STAGE_SLOTS)
+    if (g_stageProduced - g_stageConsumed >= g_stageSlots)
         return false;
 
-    u32 slot = g_stageProduced % FLASHBACK_STAGE_SLOTS;   // the oldest free staging slot
+    u32 slot = g_stageProduced % g_stageSlots;   // the oldest free staging slot
     u8 *stage = g_mem + slot * g_slotStride;
     u16 *frame = (u16 *)(g_mem + g_frameOffset);    // capture buffer, in the screen's order (only saves use it otherwise)
 
@@ -1213,15 +1268,15 @@ static bool flashbackRecordFrame(void)
     u64 t1 = svcGetSystemTick();
 
     // Frames that wouldn't get smaller are stored as they are (upright). So is a
-    // frame when the recorder is falling behind (the last frame took longer than
-    // a frame lasts: compressing at full resolution on an Old 3DS) and the SD
-    // card has time to spare (at most 1 frame waiting to be written): that
-    // trades the processor's time, which is what's running short, for the
-    // card's. Neither keeps up alone; mixed, they share the load. (An Old 3DS
-    // in Mario Kart 7 records 27 fps with ~20% of frames stored as they are.
-    // Allowing 2 frames waiting stored ~30% as they are, more than the card
-    // keeps up with: 25 fps.)
-    bool storeRaw = g_stageProduced - g_stageConsumed <= 1 && g_lastFrameTicks > SYSCLOCK_ARM11 / g_fps;
+    // frame when recording is falling behind (more than half a frame late:
+    // compressing at full resolution on an Old 3DS takes a little longer than a
+    // frame lasts) and the SD card has time to spare (at most half the staging
+    // slots waiting, which leaves the rest for its pauses): that trades the
+    // processor's time, which is what's running short, for the card's. One
+    // such frame (~12 ms instead of ~35 on an Old 3DS) makes up what a dozen
+    // compressed ones fall behind, so few are needed: an Old 3DS in Mario Kart 7
+    // stores ~6% as they are and drops 2 frames in 30 s (at 30 fps).
+    bool storeRaw = g_stageProduced - g_stageConsumed <= g_stageSlots / 2 && lateTicks > SYSCLOCK_ARM11 / g_fps / 2;
     u32 len = storeRaw ? 0 : flashbackCompress(frame, g_w, g_h, stage, g_slotBytes);
     if (len == 0 || len >= g_slotBytes)
     {
@@ -1231,7 +1286,6 @@ static bool flashbackRecordFrame(void)
     }
 
     u64 t2 = svcGetSystemTick();
-    g_lastFrameTicks = t2 - t0;
     g_winCaptureTicks += t1 - t0;
     g_winCompressTicks += t2 - t1;
     g_winPackedBytes += len;
@@ -1837,13 +1891,13 @@ static void flashbackThreadMain(void)
         bool recording = g_enabled && g_active && !menuShouldExit && !menuIsOpen();
         flashbackAudioSetCapture(recording && g_audio);
         if (recording && !wasRecording)
-        {
             flashbackResetStats();
-            g_lastFrameTicks = 0;       // not behind at a (re)start (see flashbackRecordFrame)
-        }
         if (recording)
         {
-            if (!flashbackRecordFrame())
+            // (How late this grid slot is being recorded: see below. Not at a
+            // start, which sets nextTick to the time then.)
+            u64 start = svcGetSystemTick();
+            if (!flashbackRecordFrame(start > nextTick ? start - nextTick : 0))
                 flashbackFillMissed(1);
             flashbackUpdateStats();
         }
