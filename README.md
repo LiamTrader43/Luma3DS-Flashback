@@ -49,7 +49,7 @@ You can also save from the Flashback screen with <kbd>X</kbd>. Recording pauses 
 
 Turning recording off, or changing the resolution, frame rate, length or audio, clears the buffer. Opening a menu only pauses recording, so the buffer is kept.
 
-Saving a clip takes only a few seconds, however long the clip is: the buffer itself becomes the clip, and recording carries on with a new, empty buffer. That new buffer needs free space on the SD card, as much as a full clip (up to about 354 MB at full resolution, 30 fps and 60 seconds, with audio); if there isn't enough, recording stops and the Flashback screen says the SD card is full.
+Saving a clip takes only a few seconds, however long the clip is: the buffer itself becomes the clip, and recording carries on with a new, empty buffer. That new buffer needs free space on the SD card, as much as a full clip (up to about 362 MB at full resolution, 30 fps and 60 seconds, with audio); if there isn't enough, recording stops and the Flashback screen says the SD card is full.
 
 The screen also shows live stats. **Rate** should stay close to the frame rate you picked. **Buffered** shows how many frames a save would contain right now, and how many of them are **dropped** frames: frames the recorder missed because it couldn't keep up, filled with a copy of the previous frame so clips still play at the right speed. If many frames are dropped, a lower resolution or frame rate will look smoother. With audio on, **Rate** also shows how many bits of audio were **missed** (see below).
 
@@ -86,8 +86,8 @@ The buffer lives in `/luma/flashback/ring.bin` on the SD card, and recording wri
 
 | Setting | Buffer file size (10 s) | Saved clip, `.flb` (10 s) | Written while recording |
 |---|---|---|---|
-| Half resolution, 10 fps | 4.8 MB | up to 4.8 MB | up to about 1.7 GB per hour |
-| Full resolution, 30 fps | 58 MB | up to 58 MB | up to about 21 GB per hour, typically around half that |
+| Half resolution, 10 fps | 4.9 MB | up to 4.9 MB | up to about 1.7 GB per hour |
+| Full resolution, 30 fps | 59 MB | up to 59 MB | up to about 21 GB per hour, typically around half that |
 
 A saved clip is the buffer file itself, so it's the same size (smaller if you save before the buffer has filled up). Sizes scale with the length: a 60-second buffer and clip are 6 times the sizes above. Audio adds 1.6 MB to a 10-second buffer and clip (8 MB to a 60-second one), and about 0.5 GB per hour of writing. A good-quality SD card handles this easily, but continuous writing does add wear, especially at full resolution and 30 fps. Turn recording off when you don't need it.
 

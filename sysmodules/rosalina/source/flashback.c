@@ -109,7 +109,7 @@ static volatile u32 g_fpsIdx = 2;
 static volatile u32 g_lenIdx = FLASHBACK_DEFAULT_LENGTH_IDX;
 static u32 g_w, g_h, g_fps, g_frames;   // derived from g_res / g_fpsIdx / g_lenIdx
 static u32 g_slotBytes, g_frameOffset, g_memSize;
-static u32 g_slotStride;                // ring and staging slot size: g_slotBytes rounded up to whole SD sectors
+static u32 g_slotStride;                // ring and staging slot size: g_slotBytes rounded up (flashbackSlotStride)
 
 // Rows of a frame stored as it is turned upright at a time (see
 // flashbackUprightBand): a cache line holds 16 pixels of a column.
@@ -181,7 +181,8 @@ static u32   g_slotLen[FLASHBACK_MAX_FRAMES];
 static volatile bool g_wantAudio = true;    // chosen in the menu
 static volatile bool g_audio;               // in effect (part of the recording format)
 static u32 g_audioCapFrames;                // audio ring capacity in frames (0 without audio)
-static u32 g_audioBytes;                    // the audio ring's size: the video slots start after it
+static u32 g_audioBytes;                    // the audio ring's size
+static u32 g_videoOffset;                   // where the video slots start in the ring file (flashbackVideoOffset)
 static u32 g_audioStageOffset;              // audio staging memory, in g_mem...
 static u32 g_audioStageFrames;              // ...and its size in frames (a whole number of chunks)
 
@@ -278,6 +279,27 @@ static void flashbackLayout(void)
         g_memSize += (g_audioStageFrames * FLASHBACK_AUDIO_FRAME_BYTES + 0xFFF) & ~0xFFF;
 }
 
+// Every frame is written starting on a boundary of the card's internal blocks:
+// a write that starts partway into one costs the card extra work, and the
+// processor too (an Old 3DS at full resolution, with frames every 64 KB
+// instead of every 192,512 bytes: ~4 ms less per frame to write, and ~6 ms
+// less of its time compressing, which writing had been slowing). So a ring
+// slot is the frame rounded up to the largest power of two up to 64 KB that
+// adds at most 1/32 (64 KB at full resolution, 16 KB at half), and the video
+// slots start on a 64 KB boundary after the audio ring.
+static u32 flashbackSlotStride(u32 slotBytes)
+{
+    u32 align = 0x10000;
+    while (align > 512 && ((slotBytes + align - 1) & ~(align - 1)) - slotBytes > slotBytes / 32)
+        align /= 2;
+    return (slotBytes + align - 1) & ~(align - 1);
+}
+
+static u32 flashbackVideoOffset(u32 audioBytes)
+{
+    return (audioBytes + 0xFFFF) & ~0xFFFF;
+}
+
 static void flashbackApplyFormat(u32 res, u32 fpsIdx, u32 lenIdx, bool audio)
 {
     g_res = res;
@@ -290,16 +312,14 @@ static void flashbackApplyFormat(u32 res, u32 fpsIdx, u32 lenIdx, bool audio)
     g_frames = g_lengthChoices[lenIdx] * g_fps;
 
     g_slotBytes = g_w * g_h * 2;
-    // Every ring slot starts on a 512-byte SD sector (half resolution frames,
-    // 48000 bytes, otherwise don't), so writes never need the card to read
-    // and rewrite a partially covered sector.
-    g_slotStride = (g_slotBytes + 511) & ~511;
+    g_slotStride = flashbackSlotStride(g_slotBytes);
 
-    // Audio: a ring at the start of the ring file (a whole number of chunks,
-    // so the video slots after it stay sector-aligned), and staging memory.
+    // Audio: a ring at the start of the ring file (a whole number of chunks of
+    // whole SD sectors), the video slots after it, and staging memory.
     g_audio = audio;
     g_audioCapFrames = audio ? flashbackAudioFramesFor(g_lengthChoices[lenIdx]) : 0;
     g_audioBytes = g_audioCapFrames * FLASHBACK_AUDIO_FRAME_BYTES;
+    g_videoOffset = flashbackVideoOffset(g_audioBytes);
 
     // (flashbackStart settles how much memory there is for staging.)
     g_stageSlots = FLASHBACK_STAGE_SLOTS_MAX;
@@ -868,7 +888,7 @@ static void flashbackWritePending(void)
                 len = g_slotStride;
             u64 t0 = svcGetSystemTick();
 
-            g_ring.pos = g_audioBytes + (u64)g_stageRingIdx[slot] * g_slotStride;   // pre-sized file: always an overwrite
+            g_ring.pos = g_videoOffset + (u64)g_stageRingIdx[slot] * g_slotStride;   // pre-sized file: always an overwrite
             if (R_FAILED(IFile_Write(&g_ring, &total, g_mem + slot * g_slotStride, len, 0)) || total != len)
                 g_writeFailed = true;
             else
@@ -1165,7 +1185,7 @@ static Result flashbackOpenRing(FS_Archive archive)
                                        FS_OPEN_CREATE | FS_OPEN_READ | FS_OPEN_WRITE);
     if (R_SUCCEEDED(res))
     {
-        res = IFile_SetSize(&g_ring, g_audioBytes + (u64)g_frames * g_slotStride);
+        res = IFile_SetSize(&g_ring, g_videoOffset + (u64)g_frames * g_slotStride);
         if (R_SUCCEEDED(res))
             FSFILE_SetPriority(g_ring.handle, FLASHBACK_RING_FS_PRIORITY);
         else
@@ -1402,7 +1422,7 @@ static u32 flashbackAudioSampleOf(u32 frame)
 // Version 3, recorded with audio:
 //   [audio ring]    audio.capacity stereo PCM16 samples: sample i (counting from
 //                   when the ring started) at audio.offset + (i % capacity) * 4
-//   [ring slots]    as in version 1, after the audio ring
+//   [ring slots]    as in version 1, after the audio ring (from a 64 KB boundary)
 //   [index]         entryCount x { u32 offset, u32 size, u32 copies, u32 audioPos }:
 //                   as in version 1, but with each frame's offset in the file,
 //                   and the audio sample at which it's first shown (each copy
@@ -1455,7 +1475,7 @@ static u32 flashbackBuildClipIndex(const FlashbackClipPlan *plan, u32 indexOffse
         u32 idx = flashbackPlanSlot(plan, i, &copies);
         if (g_audio)
         {
-            *entry++ = g_audioBytes + idx * g_slotStride;
+            *entry++ = g_videoOffset + idx * g_slotStride;
             *entry++ = g_slotLen[idx];
             *entry++ = copies;
             // (The oldest entry may start a few copies in: see flashbackPlanClip.)
@@ -1515,7 +1535,7 @@ static s32 flashbackSaveClipFile(FS_Archive archive, const char *clip, const Fla
 
     // The ring always starts at slot 0, so until it has wrapped once the clip
     // only uses its first g_count slots: the rest can be trimmed off.
-    u32 dataEnd = g_audioBytes + (g_count < g_frames ? g_count : g_frames) * g_slotStride;
+    u32 dataEnd = g_videoOffset + (g_count < g_frames ? g_count : g_frames) * g_slotStride;
     u8 *index = g_mem + g_frameOffset;  // the capture buffer, free while saving
     u32 indexSize = flashbackBuildClipIndex(plan, dataEnd, index);
 
@@ -2097,12 +2117,11 @@ void FlashbackMenu_Show(void)
         posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Recording:  %s\n", g_enabled ? "on" : "off");
         posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Resolution: %s\n",
                                         res == FLASHBACK_RES_FULL ? "full (400x240)" : "half (200x120)");
-        // Size of a saved clip of the full length: the ring file (frames
-        // rounded up to whole SD sectors, and the audio ring).
+        // Size of a saved clip of the full length: the ring file (the audio
+        // ring, and the frames' slots: see flashbackSlotStride).
         u32 frameBytes = (res == FLASHBACK_RES_FULL ? 400 * 240 : 200 * 120) * 2;
-        u64 clipBytes = (u64)frames * ((frameBytes + 511) & ~511);
-        if (audio)
-            clipBytes += (u64)flashbackAudioFramesFor(seconds) * FLASHBACK_AUDIO_FRAME_BYTES;
+        u32 audioBytes = audio ? flashbackAudioFramesFor(seconds) * FLASHBACK_AUDIO_FRAME_BYTES : 0;
+        u64 clipBytes = flashbackVideoOffset(audioBytes) + (u64)frames * flashbackSlotStride(frameBytes);
         u32 clipTenthsMb = (u32)((clipBytes + 50000) / 100000);     // in tenths of a MB (1 MB = 1,000,000 bytes)
 
         if (clipTenthsMb < 100)
