@@ -1,6 +1,6 @@
 # Luma3DS-Flashback
 
-![GitHub Downloads (all assets, all releases)](https://img.shields.io/github/downloads/LumaTeam/Luma3DS/total)
+![GitHub Downloads (all assets, all releases)](https://img.shields.io/github/downloads/LiamTrader43/Luma3DS-Flashback/total)
 ![License](https://img.shields.io/badge/License-GPLv3-blue.svg)
 
 *Fork of Luma3DS that adds a flashback record option*
@@ -18,7 +18,7 @@ It is built into Rosalina, so it works in **any game**, including retail games, 
 
 ### Installing
 
-Flashback is a complete Luma3DS build, so it needs [boot9strap](https://github.com/SciresM/boot9strap) like regular Luma3DS. Download `boot.firm` from this fork's releases, then choose one of these:
+Flashback is a complete Luma3DS build, so it needs [boot9strap](https://github.com/SciresM/boot9strap) like regular Luma3DS. Download `boot.firm` from [this fork's latest release](https://github.com/LiamTrader43/Luma3DS-Flashback/releases/latest), then choose one of these:
 
 * **Try it alongside your current Luma3DS (recommended):** rename and copy `boot.firm` to `/luma/payloads/y_flashback.firm` on your SD card. Hold <kbd>Y</kbd> while powering on to boot Flashback; power on normally to boot your usual Luma3DS. (When started this way, Flashback won't chainload any further payloads, so holding <kbd>Y</kbd> too long is fine. To start a different payload, boot your usual Luma3DS.)
 * **Use it as your main Luma3DS:** replace `boot.firm` in the root of your SD card. Keep a copy of your old `boot.firm` in case you want to go back.
@@ -72,13 +72,13 @@ Clips are saved in `/luma/flashback/` on the SD card as `clip_<date>.flb` files,
 To convert clips (Windows):
 
 1. Install [ffmpeg](https://ffmpeg.org/download.html) and make sure the `ffmpeg` command works in a terminal (its `bin` folder must be on your PATH).
-2. Download `convert_flashback.bat` from [Flashback-Studio](https://github.com/LiamTrader43/Flashback-Studio), the companion project for Flashback clips.
+2. Download `convert_flashback.bat` from the [latest Flashback-Studio release](https://github.com/LiamTrader43/Flashback-Studio/releases/latest) ([Flashback-Studio](https://github.com/LiamTrader43/Flashback-Studio) is the companion project for Flashback clips).
 3. Copy your `.flb` clips from the SD card to your PC.
 4. Drag one or more clips onto `convert_flashback.bat`, or put it in the folder with your clips and double-click it to convert them all.
 
 Each clip becomes an MP4 next to it, at twice the size with sharp pixels. It plays in any video player and imports into video editors like DaVinci Resolve. Clips that already have an MP4 are skipped, and a clip that was copied incompletely is reported instead of converted. Clips saved by older Flashback builds (`.raw` with a `.txt`) convert the same way.
 
-To watch clips on the 3DS itself, use the **Flashback Studio** app from [Flashback-Studio](https://github.com/LiamTrader43/Flashback-Studio). It plays them on the top screen with their sound, and can compact a clip to about half its size so it copies to a PC faster.
+To watch clips on the 3DS itself, use the **Flashback Studio** app (a `.3dsx` for the Homebrew Launcher, or a `.cia` to install) from the [latest Flashback-Studio release](https://github.com/LiamTrader43/Flashback-Studio/releases/latest). It plays them on the top screen with their sound, and can compact a clip to about half its size so it copies to a PC faster.
 
 ### SD card usage
 
