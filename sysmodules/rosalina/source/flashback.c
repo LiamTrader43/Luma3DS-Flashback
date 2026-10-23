@@ -2210,6 +2210,69 @@ static void FlashbackMenu_ChangeHotkey(void)
     }
 }
 
+// The Flashback screen is redrawn a few times a second, in place: Rosalina
+// draws straight onto the screen, so clearing it first would show as a
+// flicker. Instead each line is drawn the whole width of the screen (its text,
+// then spaces), and the rows between and below the lines are blanked, so
+// nothing from before is left over and nothing goes blank in between.
+#define FLASHBACK_SCREEN_COLS   ((SCREEN_BOT_WIDTH - 10) / SPACING_X)  // (Draw_DrawString wraps after this many)
+
+static u32 g_screenBlankFrom;   // the first row not drawn yet this time
+
+// Blanks rows y0 .. y1 - 1 of the bottom screen (pixel (x, y) is at
+// fb[x * 240 + 239 - y]).
+static void flashbackBlankRows(u32 y0, u32 y1)
+{
+    u16 *fb = (u16 *)FB_BOTTOM_VRAM_ADDR;
+    if (y1 > SCREEN_BOT_HEIGHT)
+        y1 = SCREEN_BOT_HEIGHT;
+    if (y0 >= y1)
+        return;
+    for (u32 x = 0; x < SCREEN_BOT_WIDTH; x++)
+        memset(fb + x * SCREEN_BOT_HEIGHT + (SCREEN_BOT_HEIGHT - y1), 0, (y1 - y0) * 2);
+}
+
+// Draw_DrawFormattedString at x = 10, the Flashback screen's way: each line
+// padded to the screen's width (a longer one goes on below, in pieces), and
+// the rows above it that nothing drew blanked. Returns the y after the last
+// '\n', as Draw_DrawFormattedString does.
+static u32 flashbackDrawLines(u32 posY, u32 color, const char *fmt, ...)
+{
+    char text[DRAW_MAX_FORMATTED_STRING_SIZE + 1], line[FLASHBACK_SCREEN_COLS + 1];
+    va_list args;
+    va_start(args, fmt);
+    vsprintf(text, fmt, args);
+    va_end(args);
+
+    for (const char *p = text; *p != '\0'; )
+    {
+        u32 len = 0;
+        while (p[len] != '\0' && p[len] != '\n')
+            len++;
+        for (;;)
+        {
+            u32 n = len < FLASHBACK_SCREEN_COLS ? len : FLASHBACK_SCREEN_COLS;
+            memset(line, ' ', FLASHBACK_SCREEN_COLS);
+            memcpy(line, p, n);
+            line[FLASHBACK_SCREEN_COLS] = '\0';
+            flashbackBlankRows(g_screenBlankFrom, posY);
+            Draw_DrawString(10, posY, color, line);
+            g_screenBlankFrom = posY + 10;      // (characters are 10 rows high)
+            p += n;
+            len -= n;
+            if (len == 0)
+                break;
+            posY += SPACING_Y;
+        }
+        if (*p == '\n')
+        {
+            posY += SPACING_Y;
+            p++;
+        }
+    }
+    return posY;
+}
+
 void FlashbackMenu_Show(void)
 {
     bool sdMode = flashbackIsSdMode();
@@ -2227,18 +2290,18 @@ void FlashbackMenu_Show(void)
         bool applied = res == g_res && g_wantFpsIdx == g_fpsIdx && g_wantLenIdx == g_lenIdx && audio == g_audio;
 
         Draw_Lock();
-        Draw_ClearFramebuffer();
-        Draw_DrawString(10, 10, COLOR_TITLE, "Flashback recorder");
+        g_screenBlankFrom = 0;
+        flashbackDrawLines(10, COLOR_TITLE, "Flashback recorder");
 
         u32 posY = 30;
         if (!g_threadRunning)
-            posY = Draw_DrawString(10, posY, COLOR_RED, "Recorder thread failed to start.\n\n");
+            posY = flashbackDrawLines(posY, COLOR_RED, "Recorder thread failed to start.\n\n");
         else if (!sdMode)
-            posY = Draw_DrawString(10, posY, COLOR_RED, "Only available when booting from the SD card.\n\n");
+            posY = flashbackDrawLines(posY, COLOR_RED, "Only available when booting from the SD card.\n\n");
 
-        posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Recording:  %s\n", g_enabled ? "on" : "off");
-        posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Resolution: %s\n",
-                                        res == FLASHBACK_RES_FULL ? "full (400x240)" : "half (200x120)");
+        posY = flashbackDrawLines(posY, COLOR_WHITE, "Recording:  %s\n", g_enabled ? "on" : "off");
+        posY = flashbackDrawLines(posY, COLOR_WHITE, "Resolution: %s\n",
+                                  res == FLASHBACK_RES_FULL ? "full (400x240)" : "half (200x120)");
         // Size of a saved clip of the full length: the ring file (the audio
         // ring, and the frames' slots: see flashbackSlotStride).
         u32 frameBytes = (res == FLASHBACK_RES_FULL ? 400 * 240 : 200 * 120) * 2;
@@ -2247,13 +2310,13 @@ void FlashbackMenu_Show(void)
         u32 clipTenthsMb = (u32)((clipBytes + 50000) / 100000);     // in tenths of a MB (1 MB = 1,000,000 bytes)
 
         if (clipTenthsMb < 100)
-            posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Frame rate: %lu fps   Length: %lu s (%lu.%lu MB)\n",
-                                            fps, seconds, clipTenthsMb / 10, clipTenthsMb % 10);
+            posY = flashbackDrawLines(posY, COLOR_WHITE, "Frame rate: %lu fps   Length: %lu s (%lu.%lu MB)\n",
+                                      fps, seconds, clipTenthsMb / 10, clipTenthsMb % 10);
         else
-            posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Frame rate: %lu fps   Length: %lu s (%lu MB)\n",
-                                            fps, seconds, (clipTenthsMb + 5) / 10);
-        posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Audio:      %s\n\n",
-                                        !g_audioRunning ? "failed" : g_wantAudio ? "on" : "off");
+            posY = flashbackDrawLines(posY, COLOR_WHITE, "Frame rate: %lu fps   Length: %lu s (%lu MB)\n",
+                                      fps, seconds, (clipTenthsMb + 5) / 10);
+        posY = flashbackDrawLines(posY, COLOR_WHITE, "Audio:      %s\n\n",
+                                  !g_audioRunning ? "failed" : g_wantAudio ? "on" : "off");
 
         // Counted the same way a save would be: frame times in the clip, and
         // how many of those are dropped frames filled with a copy.
@@ -2265,39 +2328,40 @@ void FlashbackMenu_Show(void)
             dropped = plan.frames - plan.slots;
         }
 
-        posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Buffered:  %lu / %lu frames, %lu dropped\n",
-                                        buffered, frames, dropped);
+        posY = flashbackDrawLines(posY, COLOR_WHITE, "Buffered:  %lu / %lu frames, %lu dropped\n",
+                                  buffered, frames, dropped);
         if (applied && g_active && g_audio)
-            posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Rate:      %lu.%lu / %lu fps   audio: %lu missed\n",
-                                            g_statFpsX10 / 10, g_statFpsX10 % 10, fps, g_audioMissed);
+            posY = flashbackDrawLines(posY, COLOR_WHITE, "Rate:      %lu.%lu / %lu fps   audio: %lu missed\n",
+                                      g_statFpsX10 / 10, g_statFpsX10 % 10, fps, g_audioMissed);
         else
-            posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Rate:      %lu.%lu / %lu fps\n",
-                                            g_statFpsX10 / 10, g_statFpsX10 % 10, fps);
-        posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Per frame: capture %lu.%lu, compress %lu.%lu, write %lu.%lums\n",
-                                        g_statCaptureUs / 1000, (g_statCaptureUs / 100) % 10,
-                                        g_statCompressUs / 1000, (g_statCompressUs / 100) % 10,
-                                        g_statWriteUs / 1000, (g_statWriteUs / 100) % 10);
-        posY = Draw_DrawFormattedString(10, posY, COLOR_WHITE, "Budget:    %lums, compressed to %lu%%, raw %lu%%\n\n",
-                                        1000 / fps, g_statSizePct, g_statRawPct);
+            posY = flashbackDrawLines(posY, COLOR_WHITE, "Rate:      %lu.%lu / %lu fps\n",
+                                      g_statFpsX10 / 10, g_statFpsX10 % 10, fps);
+        posY = flashbackDrawLines(posY, COLOR_WHITE, "Per frame: capture %lu.%lu, compress %lu.%lu, write %lu.%lums\n",
+                                  g_statCaptureUs / 1000, (g_statCaptureUs / 100) % 10,
+                                  g_statCompressUs / 1000, (g_statCompressUs / 100) % 10,
+                                  g_statWriteUs / 1000, (g_statWriteUs / 100) % 10);
+        posY = flashbackDrawLines(posY, COLOR_WHITE, "Budget:    %lums, compressed to %lu%%, raw %lu%%\n\n",
+                                  1000 / fps, g_statSizePct, g_statRawPct);
 
         const char *recordError = g_recordError;
         if (g_saving || g_saveRequested)
-            posY = Draw_DrawString(10, posY, COLOR_WHITE, "Saving...\n");
+            posY = flashbackDrawLines(posY, COLOR_WHITE, "Saving...\n");
         else if (recordError != NULL)
-            posY = Draw_DrawFormattedString(10, posY, COLOR_RED, "%s\n", recordError);
+            posY = flashbackDrawLines(posY, COLOR_RED, "%s\n", recordError);
         else if (g_lastSaveResult > 0)
-            posY = Draw_DrawFormattedString(10, posY, COLOR_GREEN, "Saved %ld frames in %lu.%lus to\n%s\n", g_lastSaveResult,
-                                            g_lastSaveMs / 1000, (g_lastSaveMs / 100) % 10, g_lastClip);
+            posY = flashbackDrawLines(posY, COLOR_GREEN, "Saved %ld frames in %lu.%lus to\n%s\n", g_lastSaveResult,
+                                      g_lastSaveMs / 1000, (g_lastSaveMs / 100) % 10, g_lastClip);
         else if (g_lastSaveResult < 0)
-            posY = Draw_DrawFormattedString(10, posY, COLOR_RED, "Save failed (%ld).\n", g_lastSaveResult);
+            posY = flashbackDrawLines(posY, COLOR_RED, "Save failed (%ld).\n", g_lastSaveResult);
 
         posY += 10;
-        posY = Draw_DrawString(10, posY, COLOR_WHITE, "A: recording on/off   X: save clip now   B: back\n");
-        posY = Draw_DrawString(10, posY, COLOR_WHITE, "Y: resolution   Left/Right: fps   L/R: length\n");
-        posY = Draw_DrawString(10, posY, COLOR_WHITE, "Start: audio   Select: hotkey\n");
-        posY = Draw_DrawString(10, posY, COLOR_WHITE, "Off or res/fps/length/audio clear the buffer.\n\n");
+        posY = flashbackDrawLines(posY, COLOR_WHITE, "A: recording on/off   X: save clip now   B: back\n");
+        posY = flashbackDrawLines(posY, COLOR_WHITE, "Y: resolution   Left/Right: fps   L/R: length\n");
+        posY = flashbackDrawLines(posY, COLOR_WHITE, "Start: audio   Select: hotkey\n");
+        posY = flashbackDrawLines(posY, COLOR_WHITE, "Off or res/fps/length/audio clear the buffer.\n\n");
         LumaConfig_ConvertComboToString(comboStr, g_saveCombo);
-        Draw_DrawFormattedString(10, posY, COLOR_WHITE, "In game: %s saves a clip.", comboStr);
+        flashbackDrawLines(posY, COLOR_WHITE, "In game: %s saves a clip.", comboStr);
+        flashbackBlankRows(g_screenBlankFrom, SCREEN_BOT_HEIGHT);
 
         Draw_FlushFramebuffer();
         Draw_Unlock();
