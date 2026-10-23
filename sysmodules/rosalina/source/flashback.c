@@ -164,10 +164,11 @@ static u32   g_slotLen[FLASHBACK_MAX_FRAMES];
 #define FLASHBACK_AUDIO_FRAME_BYTES     (FLASHBACK_AUDIO_FRAME_SAMPLES * 4)     // stereo PCM16
 #define FLASHBACK_AUDIO_FRAME_TICKS     (FLASHBACK_AUDIO_FRAME_SAMPLES * 8192)  // ARM11 ticks per audio frame
 #define FLASHBACK_AUDIO_RATE_MHZ        32728498    // SYSCLOCK_ARM11 / 8192, in millihertz
-// Audio is written in chunks of this many frames (20480 bytes, a whole number
-// of SD sectors). The ring and the staging memory hold whole chunks, so a chunk
-// never wraps around in either.
-#define FLASHBACK_AUDIO_CHUNK_FRAMES    32
+// Audio is written in chunks of this many frames (40960 bytes, a whole number
+// of SD sectors; each write request costs the card ~9 ms however small, so
+// fewer, bigger ones leave it more time for video). The ring and the staging
+// memory hold whole chunks, so a chunk never wraps around in either.
+#define FLASHBACK_AUDIO_CHUNK_FRAMES    64
 // Audio staging: enough for the writer to fall behind for a while. In Ocarina
 // of Time 3D, writes regularly stall for 0.4-0.8 s while the game reads the SD
 // card (video frames get dropped then); audio staging covers that. If there
@@ -1338,10 +1339,13 @@ static bool flashbackPackFrame(void)
     // frame when packing is falling behind (the next frame is already captured
     // and waiting) and the SD card has time to spare (at most half the staging
     // slots waiting, which leaves the rest for its pauses): that trades the
-    // processor's time for the card's.
+    // processor's time for the card's. With the capture queue one frame from
+    // full (the next capture would be dropped), up to 3/4 of the slots may wait.
     u64 t1 = svcGetSystemTick();
     u32 capTicks1 = g_capTicksTotal;
-    bool storeRaw = g_capProduced - g_capConsumed >= 2 && g_stageProduced - g_stageConsumed <= g_stageSlots / 2;
+    u32 queued = g_capProduced - g_capConsumed, staged = g_stageProduced - g_stageConsumed;
+    bool storeRaw = queued >= 2 && (staged <= g_stageSlots / 2 ||
+                                    (queued >= g_capBufs - 1 && staged <= g_stageSlots * 3 / 4));
     u32 len = storeRaw ? 0 : flashbackCompress(frame, g_w, g_h, stage, g_slotBytes);
     if (len == 0 || len >= g_slotBytes)
     {
