@@ -12,7 +12,7 @@
 
 ## Flashback recorder
 
-Flashback is a "replay buffer" for the 3DS top screen. While recording is on, it keeps the **last 10 seconds** of gameplay, with sound (adjustable from 10 seconds to a minute). When something worth keeping happens, press a button combo and those seconds are saved to the SD card as a video file.
+Flashback is a "replay buffer" for the 3DS top screen. While recording is on, it keeps the **last 30 seconds** of gameplay, with sound (adjustable from 10 seconds to a minute). When something worth keeping happens, press a button combo and those seconds are saved to the SD card as a video file.
 
 It is built into Rosalina, so it works in **any game**, including retail games, without plugins. It uses none of the game's memory and has no noticeable effect on game performance.
 
@@ -29,7 +29,7 @@ To check that you're running Flashback, open the Rosalina menu (<kbd>L+Down+Sele
 
 1. Open the Rosalina menu with <kbd>L+Down+Select</kbd> and choose **Flashback recorder**.
 2. Press <kbd>A</kbd> to turn **Recording** on, then press <kbd>B</kbd> twice to return to your game.
-3. Play. Flashback always keeps the most recent 10 seconds (or the length you've chosen).
+3. Play. Flashback always keeps the most recent 30 seconds (or the length you've chosen).
 4. When you want to keep a moment, press <kbd>L+R+Down</kbd>. The bottom screen gets a see-through **white** tint while saving, then briefly turns **green** when the clip is saved (or **red** if something went wrong). You can keep seeing and using the bottom screen the whole time.
 
 You can also save from the Flashback screen with <kbd>X</kbd>. Recording pauses while any Rosalina menu is open (the game is paused too), so saving from the menu doesn't add frozen frames to the end of your clip.
@@ -93,12 +93,12 @@ A saved clip is the buffer file itself, so it's the same size (smaller if you sa
 
 ### Limitations
 
-* **Recording is always off after a reboot**: turn it on from the Flashback screen each time. Your other settings (resolution, frame rate, length, audio and hotkey) are remembered in `/luma/flashback/settings.bin` when you leave the Flashback screen. Delete that file to go back to the defaults: full resolution and 30 fps on New 3DS/2DS (half resolution and 30 fps on Old 3DS/2DS), 10 seconds, audio on, hotkey <kbd>L+R+Down</kbd>.
+* **Recording is always off after a reboot**: turn it on from the Flashback screen each time. Your other settings (resolution, frame rate, length, audio and hotkey) are remembered in `/luma/flashback/settings.bin` when you leave the Flashback screen. Delete that file to go back to the defaults: full resolution, 30 fps, 30 seconds, audio on, hotkey <kbd>L+R+Down</kbd>.
 * **Only the top screen** is recorded, and only the left eye when 3D is on.
 * **Audio is the game's, at full volume**: it's recorded before the volume slider, so clips have the same level however loud the 3DS is set. Sounds played through the 3DS's other sound hardware (CSND, used by a few games, some system sounds and older homebrew) aren't recorded.
 * **Converting clips needs Windows**: `convert_flashback.bat` uses PowerShell, which comes with Windows. There's no converter for macOS or Linux yet.
 * **SD card only**: Flashback is disabled when Luma3DS boots from the internal memory (NAND).
-* **Old 3DS/2DS are slower**: they have a much slower CPU, so higher settings can make games run slower. That's why they default to half resolution. Full resolution at 30 fps does work on them: in testing, an Old 3DS recorded Mario Kart 7 that way with only a few dropped frames per race. If a game slows down or drops many frames, lower the resolution or frame rate.
+* **Old 3DS/2DS are slower**: they have a much slower CPU, so higher settings can make games run slower. They still default to full resolution at 30 fps: in testing, an Old 3DS recorded Mario Kart 7 that way with only a few dropped frames per race. If a game slows down or drops many frames, lower the resolution or frame rate.
 
 ## Description
 **Luma3DS** patches and reimplements significant parts of the system software running on all models of the Nintendo 3DS family of consoles. It aims to greatly improve the user experience and support the 3DS far beyond its end-of-life. Features include:

@@ -77,7 +77,7 @@ static const u32 g_fpsChoices[] = { 10, 20, 30 };
 // Clip length in seconds (how much the ring buffer holds).
 static const u32 g_lengthChoices[] = { 10, 20, 30, 40, 50, 60 };
 #define FLASHBACK_LENGTH_CHOICES (sizeof(g_lengthChoices) / sizeof(g_lengthChoices[0]))
-#define FLASHBACK_DEFAULT_LENGTH_IDX 0      // 10 seconds
+#define FLASHBACK_DEFAULT_LENGTH_IDX 2      // 30 seconds
 #define FLASHBACK_MAX_FRAMES    (60 * 30)   // longest length at the highest frame rate
 
 static MyThread flashbackThread;
@@ -85,8 +85,9 @@ static u8 CTR_ALIGN(8) flashbackThreadStack[0x2000];
 static bool g_threadRunning;
 
 static volatile bool g_enabled;         // user toggle
-// Defaults when no settings are saved: full resolution, 30 fps on New 3DS;
-// half resolution, 30 fps on Old 3DS (see flashbackApplyDefaults).
+// Defaults when no settings are saved, on every model: full resolution, 30 fps,
+// 30 seconds. (An Old 3DS keeps up at full resolution too: Mario Kart 7 drops
+// only a few frames a race.)
 static volatile u32  g_wantRes = FLASHBACK_RES_FULL;   // FlashbackResolution chosen in the menu
 static volatile u32  g_wantFpsIdx = 2;                 // index into g_fpsChoices chosen in the menu (30 fps)
 static volatile u32  g_wantLenIdx = FLASHBACK_DEFAULT_LENGTH_IDX; // index into g_lengthChoices chosen in the menu
@@ -1778,16 +1779,6 @@ static FlashbackSettings flashbackCurrentSettings(void)
     return s;
 }
 
-// Old 3DS has a third of the CPU speed, and the system core Flashback runs on
-// also serves the game's graphics, input and file requests there, so it gets
-// a lighter default: half resolution (at the same 30 fps). Saved settings still
-// override it.
-static void flashbackApplyDefaults(void)
-{
-    if (!isN3DS)
-        g_wantRes = FLASHBACK_RES_HALF;
-}
-
 // Loads saved settings, keeping the defaults for anything missing or invalid.
 static void flashbackLoadSettings(void)
 {
@@ -1944,7 +1935,6 @@ static void flashbackClearTint(void)
 static void flashbackThreadMain(void)
 {
     bool sdMode = flashbackIsSdMode();
-    flashbackApplyDefaults();
     if (sdMode)
         flashbackLoadSettings();
     flashbackApplyFormat(g_wantRes, g_wantFpsIdx, g_wantLenIdx, flashbackAudioWanted());
