@@ -110,7 +110,7 @@ static volatile u32 g_fpsIdx = 2;
 static volatile u32 g_lenIdx = FLASHBACK_DEFAULT_LENGTH_IDX;
 static u32 g_w, g_h, g_fps, g_frames;   // derived from g_res / g_fpsIdx / g_lenIdx
 static u32 g_slotBytes, g_frameOffset, g_memSize;
-static u32 g_slotStride;                // ring and staging slot size: g_slotBytes rounded up (flashbackSlotStride)
+static u32 g_slotStride;                // ring slot size: g_slotBytes rounded up (flashbackSlotStride)
 
 // Rows of a frame stored as it is turned upright at a time (see
 // flashbackUprightBand): a cache line holds 16 pixels of a column.
@@ -208,7 +208,7 @@ static u8 CTR_ALIGN(8) flashbackAudioStack[0x1000];
 static bool g_audioRunning;                 // the audio thread exists
 
 // Frames waiting to be written to the ring file. The packer thread compresses
-// captured frames into staging slots, and the writer thread writes them out,
+// captured frames into staging memory, and the writer thread writes them out,
 // so compressing the next frame overlaps with writing the previous ones.
 // On a New 3DS XL the SD path tops out around 5 MB/s, which is less than full
 // resolution at 30 fps needs uncompressed (5.8 MB/s); compression is what
@@ -217,22 +217,50 @@ static bool g_audioRunning;                 // the audio thread exists
 //
 // The card also pauses now and then (single writes of 100-200 ms on an Old 3DS,
 // where the average write is barely under a frame's time), and every frame
-// captured meanwhile waits in a slot. So there are as many slots as there's
-// memory for, up to FLASHBACK_STAGE_SLOTS_MAX (~3 MB at full resolution): an
-// Old 3DS in Mario Kart 7 dropped ~50 frames in 30 s with 4 slots, waiting on
-// the card, and none with 16. Always a power of two (see below).
-#define FLASHBACK_STAGE_SLOTS_MAX   16
+// captured meanwhile waits in staging. So there's as much staging as there's
+// memory for: FLASHBACK_STAGE_SLOTS_BASE uncompressed frames' worth (~3 MB at
+// full resolution), halving down to FLASHBACK_STAGE_SLOTS_MIN if memory is
+// short (an Old 3DS in Mario Kart 7 dropped ~50 frames in 30 s with room for 4,
+// waiting on the card, and none with 16). Some cards slow down for seconds at a
+// time, though: in an SD test on a New 3DS, a SanDisk Ultra dropped ~220 frames
+// a minute with that much (packed, see below), ~75 with twice as much and ~30
+// with four times, and would have needed ~6 times as much (~20 MB) to drop
+// none. So staging grows further, up to FLASHBACK_STAGE_SLOTS_MAX (~25 MB:
+// recording a game, that card then dropped none, with up to ~185 frames
+// waiting), but only while that leaves FLASHBACK_MEM_MARGIN of the system's
+// memory free (the HOME Menu, applets, and Rosalina's menu and screenshots need
+// some; an Old 3DS gets by with ~13 MB free): a New 3DS has ~60 MB of it free
+// with a game running and takes the most; an Old 3DS has ~17 MB and stays at
+// the base.
+#define FLASHBACK_STAGE_SLOTS_BASE  16
+#define FLASHBACK_STAGE_SLOTS_MAX   128
 #define FLASHBACK_STAGE_SLOTS_MIN   4
+#define FLASHBACK_MEM_MARGIN        (24 * 1024 * 1024)
 
-// Staging slots are used in order: frame number p (counting every frame ever
-// staged) goes to staging slot p % g_stageSlots, independent of its ring slot
-// (stored next to it), so any ring size works. g_stageProduced -
-// g_stageConsumed frames are waiting, oldest first, starting at staging slot
-// g_stageConsumed % g_stageSlots. Both counters only ever increase (and stay
-// in step with the slots when they wrap, g_stageSlots being a power of two).
-static u32 g_stageSlots;                // staging slots in use (flashbackStart)
-static u32 g_stageRingIdx[FLASHBACK_STAGE_SLOTS_MAX];  // ring slot of each staged frame
-static u32 g_stageLen[FLASHBACK_STAGE_SLOTS_MAX];      // bytes to write for each staged frame
+// Staged frames are packed one after another, each taking only what it
+// compressed to (rounded up to FLASHBACK_STAGE_ALIGN), and staging is used
+// round and round: a frame that might not fit before the end goes at the start.
+// Frames typically compress to a third or a half, so two or three times as
+// many fit as uncompressed: some cards are slower than a frame's time for many
+// writes in a row (a tester's New 3DS dropped over 100 frames a minute waiting
+// on one, with room for 16), and that's waited out for two or three times as long. A frame
+// is only started where there's room for it uncompressed: its size is only
+// known once it's compressed. Frame number p (counting every frame ever
+// staged) has entry p % FLASHBACK_STAGE_ENTRIES: where it starts, its ring
+// slot (so any ring size works) and its size. g_stageProduced -
+// g_stageConsumed frames are waiting, oldest first; both counters only ever
+// increase (and stay in step with the entries when they wrap, there being a
+// power of two of them).
+#ifndef FLASHBACK_STAGE_ALIGN
+#define FLASHBACK_STAGE_ALIGN       0x1000      // a page; a multiple of the SD sector (writes are rounded up to whole ones)
+#endif
+#define FLASHBACK_STAGE_ENTRIES     512         // frames that can wait at most
+static u32 g_stageSlots;                // staging size, in uncompressed frames (flashbackStart)
+static u32 g_stageBytes;                // ...and in bytes (flashbackLayout)
+static u32 g_stageHead;                 // where the frame after the newest staged one may go (packer thread)
+static u32 g_stageOff[FLASHBACK_STAGE_ENTRIES];      // where each staged frame starts in staging
+static u32 g_stageRingIdx[FLASHBACK_STAGE_ENTRIES];  // ring slot of each staged frame
+static u32 g_stageLen[FLASHBACK_STAGE_ENTRIES];      // bytes to write for each staged frame
 static volatile u32 g_stageProduced;    // frames staged (packer thread)
 static volatile u32 g_stageConsumed;    // frames written or given up on (writer thread)
 static volatile bool g_writeFailed;     // a ring write failed (writer -> capture thread)
@@ -241,7 +269,7 @@ static LightEvent g_writeEvent;         // signaled when a frame is staged
 
 // Frames captured and waiting to be compressed. The capture thread only
 // captures, on the frame grid, into one of g_capBufs capture buffers; the
-// packer thread compresses them, in order, into staging slots. So a frame
+// packer thread compresses them, in order, into staging. So a frame
 // that's slow to compress (the processor held up for a while) no longer makes
 // the next capture late: the packer catches up within a few frames. (An Old
 // 3DS in Mario Kart 7 at full resolution: a few frames dropped in 30 s with
@@ -249,7 +277,7 @@ static LightEvent g_writeEvent;         // signaled when a frame is staged
 // buffers as there's memory for (see flashbackStart), up to
 // FLASHBACK_CAPTURE_BUFS_MAX; with 1 the capture waits for each compression
 // again. Frame number p goes to buffer p % g_capBufs (a power of two, as with
-// the staging slots).
+// the staging entries).
 #define FLASHBACK_CAPTURE_BUFS_MAX  4
 static u32 g_capBufs;                   // capture buffers in use (flashbackStart)
 static u32 g_capStride;                 // bytes between them (the first at g_frameOffset)
@@ -292,16 +320,17 @@ static u32 flashbackAudioFramesFor(u32 seconds)
     return (frames + FLASHBACK_AUDIO_CHUNK_FRAMES - 1) / FLASHBACK_AUDIO_CHUNK_FRAMES * FLASHBACK_AUDIO_CHUNK_FRAMES;
 }
 
-// Where things are in the recorder's memory, for g_stageSlots staging slots,
-// g_capBufs capture buffers and g_audioStageFrames of audio staging: the
-// staging slots first, then the capture buffers, which hold frames as captured
+// Where things are in the recorder's memory, for g_stageSlots frames' worth of
+// staging, g_capBufs capture buffers and g_audioStageFrames of audio staging:
+// the staging first, then the capture buffers, which hold frames as captured
 // (before compression) while recording, the first of them the clip's index
 // while saving (the two never overlap in time: see flashbackDrainCaptures),
 // each with a column's worth after it that compressing reads past the frame
 // (flashbackCompress), then the audio staging.
 static void flashbackLayout(void)
 {
-    g_frameOffset = (g_stageSlots * g_slotStride + 0xFFF) & ~0xFFF;
+    g_stageBytes = g_stageSlots * g_slotStride;
+    g_frameOffset = (g_stageBytes + 0xFFF) & ~0xFFF;
     g_capStride = (g_slotBytes + g_h * 2 + 0xFFF) & ~0xFFF;
     g_memSize = g_frameOffset + g_capBufs * g_capStride;
     g_audioStageOffset = g_memSize;
@@ -907,20 +936,20 @@ static void flashbackWritePending(void)
             return;
         __sync_synchronize();   // see the staged frame, its ring slot and size before using them
 
-        u32 slot = consumed % g_stageSlots;
+        u32 e = consumed % FLASHBACK_STAGE_ENTRIES;
 
         // After a failure, frames are only discarded, so the capture thread
         // can stop recording without waiting on a broken card.
         if (!g_writeFailed)
         {
             u64 total;
-            u32 len = (g_stageLen[slot] + 511) & ~511;
+            u32 len = (g_stageLen[e] + 511) & ~511;     // (within the frame's space in staging: see FLASHBACK_STAGE_ALIGN)
             if (len > g_slotStride)
                 len = g_slotStride;
             u64 t0 = svcGetSystemTick();
 
-            g_ring.pos = g_videoOffset + (u64)g_stageRingIdx[slot] * g_slotStride;   // pre-sized file: always an overwrite
-            if (R_FAILED(IFile_Write(&g_ring, &total, g_mem + slot * g_slotStride, len, 0)) || total != len)
+            g_ring.pos = g_videoOffset + (u64)g_stageRingIdx[e] * g_slotStride;   // pre-sized file: always an overwrite
+            if (R_FAILED(IFile_Write(&g_ring, &total, g_mem + g_stageOff[e], len, 0)) || total != len)
                 g_writeFailed = true;
             else
             {
@@ -929,7 +958,7 @@ static void flashbackWritePending(void)
             }
         }
 
-        __sync_synchronize();   // finish with the slot before handing it back
+        __sync_synchronize();   // finish with the frame's staging before handing it back
         g_stageConsumed = consumed + 1;
     }
 }
@@ -1225,25 +1254,63 @@ static Result flashbackOpenRing(FS_Archive archive)
     return res;
 }
 
+// The recorder's memory (g_memSize at FLASHBACK_MEM_ADDR) is taken in pieces of
+// at most FLASHBACK_MEM_CHUNK, one after another, so it's still one range of
+// addresses: a New 3DS's kernel turns down single requests of ~14 MB and more
+// ("out of range") with that much memory free. Returns the first failure,
+// with whatever was taken given back.
+#define FLASHBACK_MEM_CHUNK     (4 * 1024 * 1024)
+
+static Result flashbackAllocMem(u32 size)
+{
+    u32 tmp;
+    for (u32 off = 0; off < size; off += FLASHBACK_MEM_CHUNK)
+    {
+        u32 n = size - off < FLASHBACK_MEM_CHUNK ? size - off : FLASHBACK_MEM_CHUNK;
+        Result res = svcControlMemoryEx(&tmp, FLASHBACK_MEM_ADDR + off, 0, n,
+                                        MEMOP_ALLOC | MEMOP_REGION_SYSTEM, MEMPERM_READWRITE, true);
+        if (R_FAILED(res))
+        {
+            for (u32 o = 0; o < off; o += FLASHBACK_MEM_CHUNK)
+                svcControlMemory(&tmp, FLASHBACK_MEM_ADDR + o, 0, FLASHBACK_MEM_CHUNK, MEMOP_FREE, 0);
+            return res;
+        }
+    }
+    return 0;
+}
+
+static void flashbackFreeMem(u32 size)
+{
+    u32 tmp;
+    for (u32 off = 0; off < size; off += FLASHBACK_MEM_CHUNK)
+        svcControlMemory(&tmp, FLASHBACK_MEM_ADDR + off, 0, size - off < FLASHBACK_MEM_CHUNK ? size - off : FLASHBACK_MEM_CHUNK,
+                         MEMOP_FREE, 0);
+}
+
 static Result flashbackStart(void)
 {
     Result res;
-    u32 tmp;
     FS_Archive archive;
 
     flashbackAudioPause();
 
-    // As many staging slots as there's memory for (halving down to the
-    // fewest), then capture buffers (down to 1), and short of memory even then,
+    // As much staging as there's memory for: more than the base only while
+    // that leaves FLASHBACK_MEM_MARGIN free; then the base, halving down to the
+    // least, then capture buffers (down to 1), and short of memory even then,
     // less audio staging.
+    u64 sysFree = (u64)osGetMemRegionFree(MEMREGION_SYSTEM);
     g_stageSlots = FLASHBACK_STAGE_SLOTS_MAX;
     g_capBufs = FLASHBACK_CAPTURE_BUFS_MAX;
     g_audioStageFrames = FLASHBACK_AUDIO_STAGE_FRAMES;
     for (;;)
     {
         flashbackLayout();
-        res = svcControlMemoryEx(&tmp, FLASHBACK_MEM_ADDR, 0, g_memSize,
-                                 MEMOP_ALLOC | MEMOP_REGION_SYSTEM, MEMPERM_READWRITE, true);
+        if (g_stageSlots > FLASHBACK_STAGE_SLOTS_BASE && (u64)g_memSize + FLASHBACK_MEM_MARGIN > sysFree)
+        {
+            g_stageSlots /= 2;
+            continue;
+        }
+        res = flashbackAllocMem(g_memSize);
         if (R_SUCCEEDED(res))
             break;
         if (g_stageSlots > FLASHBACK_STAGE_SLOTS_MIN)
@@ -1268,7 +1335,7 @@ static Result flashbackStart(void)
 
     if (R_FAILED(res))
     {
-        svcControlMemory(&tmp, FLASHBACK_MEM_ADDR, 0, g_memSize, MEMOP_FREE, 0);
+        flashbackFreeMem(g_memSize);
         g_mem = NULL;
         return res;
     }
@@ -1308,7 +1375,6 @@ static void flashbackDrainCaptures(void)
 
 static void flashbackStop(void)
 {
-    u32 tmp;
     if (!g_active)
         return;
 
@@ -1316,37 +1382,53 @@ static void flashbackStop(void)
     flashbackAudioPause();
     flashbackDrainWrites();     // the writer must be done with the file and slots
     IFile_Close(&g_ring);
-    svcControlMemory(&tmp, FLASHBACK_MEM_ADDR, 0, g_memSize, MEMOP_FREE, 0);
+    flashbackFreeMem(g_memSize);
     g_mem = NULL;
     g_active = false;
     g_count = 0;
 }
 
-// Compresses the oldest captured frame into the next staging slot and hands it
-// to the writer (packer thread). Returns false if no staging slot is free yet
-// (the SD card is behind): try again a little later.
+// Compresses the oldest captured frame into staging, after the newest staged
+// one, and hands it to the writer (packer thread). Returns false if staging has
+// no room for it yet (the SD card is behind): try again a little later.
 static bool flashbackPackFrame(void)
 {
-    if (g_stageProduced - g_stageConsumed >= g_stageSlots)
-        return false;
+    // Room for the frame uncompressed: after the newest staged frame, or at the
+    // start of staging if not before its end (the oldest frame, perhaps being
+    // written, starts where the free space ends).
+    u32 consumed = g_stageConsumed, staged = g_stageProduced - consumed;
+    u32 need = (g_slotBytes + FLASHBACK_STAGE_ALIGN - 1) & ~(FLASHBACK_STAGE_ALIGN - 1);
+    u32 off = staged == 0 ? 0 : g_stageHead;    // (nothing waiting: start over at the start)
+    if (staged != 0)
+    {
+        u32 tail = g_stageOff[consumed % FLASHBACK_STAGE_ENTRIES];
+        if (staged >= FLASHBACK_STAGE_ENTRIES)
+            return false;
+        if (off > tail && off + need > g_stageBytes)
+            off = 0;                            // (on round to the start)
+        if (off <= tail && off + need > tail)   // (off == tail with frames waiting: staging is full)
+            return false;
+    }
     __sync_synchronize();   // (the captured frame and its details, as the capture thread left them)
 
     u32 b = g_capConsumed % g_capBufs;
     u16 *frame = (u16 *)(g_mem + g_frameOffset + b * g_capStride);
-    u32 slot = g_stageProduced % g_stageSlots;   // the oldest free staging slot
-    u8 *stage = g_mem + slot * g_slotStride;
+    u8 *stage = g_mem + off;
 
     // Frames that wouldn't get smaller are stored as they are (upright). So is a
     // frame when packing is falling behind (the next frame is already captured
-    // and waiting) and the SD card has time to spare (at most half the staging
-    // slots waiting, which leaves the rest for its pauses): that trades the
-    // processor's time for the card's. With the capture queue one frame from
-    // full (the next capture would be dropped), up to 3/4 of the slots may wait.
+    // and waiting) and the SD card has time to spare (at most half as many
+    // frames waiting as the base staging holds uncompressed, which leaves the
+    // rest for its pauses): that trades the processor's time for the card's.
+    // With the capture queue one frame from full (the next capture would be
+    // dropped), up to 3/4 as many may wait. (Counted from the base, at most:
+    // staging beyond it is for the card's slow spells, not for this.)
     u64 t1 = svcGetSystemTick();
     u32 capTicks1 = g_capTicksTotal;
-    u32 queued = g_capProduced - g_capConsumed, staged = g_stageProduced - g_stageConsumed;
-    bool storeRaw = queued >= 2 && (staged <= g_stageSlots / 2 ||
-                                    (queued >= g_capBufs - 1 && staged <= g_stageSlots * 3 / 4));
+    u32 queued = g_capProduced - g_capConsumed;
+    u32 rawRoom = g_stageSlots < FLASHBACK_STAGE_SLOTS_BASE ? g_stageSlots : FLASHBACK_STAGE_SLOTS_BASE;
+    bool storeRaw = queued >= 2 && (staged <= rawRoom / 2 ||
+                                    (queued >= g_capBufs - 1 && staged <= rawRoom * 3 / 4));
     u32 len = storeRaw ? 0 : flashbackCompress(frame, g_w, g_h, stage, g_slotBytes);
     if (len == 0 || len >= g_slotBytes)
     {
@@ -1369,9 +1451,12 @@ static bool flashbackPackFrame(void)
     g_repeat[g_head] = 0;
     g_slotLen[g_head] = len;
     g_slotAudioFrame[g_head] = g_capAudioFrame[b];
-    g_stageRingIdx[slot] = g_head;
-    g_stageLen[slot] = len;
-    __sync_synchronize();   // frame, ring slot and size must be visible before the frame is handed over
+    u32 e = g_stageProduced % FLASHBACK_STAGE_ENTRIES;
+    g_stageOff[e] = off;
+    g_stageRingIdx[e] = g_head;
+    g_stageLen[e] = len;
+    g_stageHead = off + ((len + FLASHBACK_STAGE_ALIGN - 1) & ~(FLASHBACK_STAGE_ALIGN - 1));
+    __sync_synchronize();   // frame, place, ring slot and size must be visible before the frame is handed over
     g_stageProduced++;
 
     g_head = (g_head + 1) % g_frames;
@@ -1434,7 +1519,7 @@ static void flashbackPackThreadMain(void)
         LightEvent_WaitTimeout(&g_packEvent, 100 * 1000 * 1000LL);
         while (g_capProduced != g_capConsumed)
             if (!flashbackPackFrame())
-                svcSleepThread(1 * 1000 * 1000LL);     // no staging slot yet: the card is behind
+                svcSleepThread(1 * 1000 * 1000LL);     // no room in staging yet: the card is behind
     }
 }
 
