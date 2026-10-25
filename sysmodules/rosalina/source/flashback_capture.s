@@ -1,7 +1,7 @@
-@ Flashback's capture conversion (flashbackConvert in flashback.c) in ARM
-@ assembly, for full resolution (every framebuffer row) in the common formats:
-@ the same RGB565 output as flashbackConvertFrame, byte for byte, at a fraction
-@ of the instructions.
+@ Flashback's capture conversion (flashbackConvert in flashback_framebuffer.c)
+@ in ARM assembly, for full resolution (every framebuffer row) in the common
+@ formats: the same RGB565 output as flashbackConvertFrame, byte for byte, at a
+@ fraction of the instructions.
 @
 @   void flashbackConvertRgba8(const u8 *src, u16 *dst, u32 cols, u32 skip);
 @   void flashbackConvertBgr8(const u8 *src, u16 *dst, u32 cols, u32 skip);

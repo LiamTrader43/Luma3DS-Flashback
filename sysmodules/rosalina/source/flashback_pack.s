@@ -1,4 +1,4 @@
-@ Flashback's packer (see flashbackCompress in flashback.c) in ARM assembly,
+@ Flashback's packer (flashbackCompress, flashback_compress.c) in ARM assembly,
 @ arranged for the ARM11 (in order, one instruction at a time): the same output
 @ as flashbackPackPixels, byte for byte, without its room check.
 @

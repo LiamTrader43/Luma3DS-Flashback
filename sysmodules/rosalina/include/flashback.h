@@ -30,8 +30,8 @@
 // read straight from the display hardware's current framebuffer (like the
 // screenshot feature), converted to RGB565 at half (200x120) or full (400x240)
 // resolution at 10, 20 or 30 fps, compressed losslessly, and written to a ring
-// file on the SD card holding the last 10 to 60 seconds. Saving turns that ring
-// file into the clip (/luma/flashback/clip_<date>.flb, decoded by
+// file on the SD card holding the last 10 seconds to 2 minutes. Saving turns
+// that ring file into the clip (/luma/flashback/clip_<date>.flb, decoded by
 // Flashback-Studio: convert_flashback.bat on a PC, or its 3DS app) and starts a
 // new one.
 //
