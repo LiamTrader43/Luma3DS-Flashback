@@ -21,8 +21,10 @@ Frames and audio go through these stages:
 4. **Audio.** The audio thread copies the DSP's output into audio staging, and
    the writer writes it in chunks to an audio ring at the start of the same
    file (`flashback_audio.c`).
-5. **Saving.** A save renames the ring file to the clip, appends an index, and
-   starts a new ring (`flashback_clip.c`).
+5. **Inputs.** The capture thread also keeps a record of the inputs for every
+   grid slot, in memory (`flashback_input.c`).
+6. **Saving.** A save renames the ring file to the clip, appends the inputs and
+   an index, and starts a new ring (`flashback_clip.c`).
 
 Each stage hands work to the next through counters that only go up. So a slow
 stage makes the work wait in memory instead of holding up the stages before it.

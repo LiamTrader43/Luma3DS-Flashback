@@ -47,15 +47,18 @@ do, without that repository. Keep the copy in step with the original.
 
 **Fuzz test** (`fuzz.c`). A deterministic random test of everything recording
 does: the capture queue, packed staging at every size it can have, audio
-staging, and the writer. It also covers saves (including ones that fail and carry
-on), write failures, staging running full, every clip length and frame rate, and
-audio on and off. Frames are really compressed, at a tiny resolution. The "SD
-card" lets the other threads' work happen in the middle of each write, so
-touching data that's being written would show up. After every drain, it checks
+staging, the writer, and the inputs' records. It also covers saves (including
+ones that fail and carry on), write failures, staging running full, every clip
+length and frame rate, and audio on and off. Frames are really compressed, at a
+tiny resolution. The "SD card" lets the other threads' work happen in the middle
+of each write, so touching data that's being written would show up. A fake HID
+takes readings between and during grid slots, sometimes more than the 8 it
+holds, and the recorder sometimes wakes up late. After every drain, it checks
 exactly that:
 - the audio ring holds every audio frame it should;
 - every buffered slot holds the right frame, with the right audio position;
-- a save would write the right clip index.
+- a save would write the right clip index, and the right inputs for every frame
+  (against a model of what each record should hold).
 
 **End-to-end test** (`e2e.c`). The recorder's threads run for real, in real
 time:
@@ -67,7 +70,8 @@ time:
 It goes through Rosalina menu pauses, a DSP stall, the audio thread held up, a
 save in the middle, and recording on afterwards. Then it reads the saved clips
 the way a reader would, and checks the audio sample by sample against the
-video. It writes them to `build/out/clip_test1..4.flb` (clip 4 has a beep and a
+video. It also checks the inputs: a record for every frame, in order, and none
+from while a menu was open (a fake HID holds SELECT then). It writes the clips to `build/out/clip_test1..4.flb` (clip 4 has a beep and a
 white frame once a second, for checking sync by eye in Flashback Studio). It
 runs in real time, so a busy PC can make it fail on timing. If it fails, run it
 again on a quiet PC before looking further.

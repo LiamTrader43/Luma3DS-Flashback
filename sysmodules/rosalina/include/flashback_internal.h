@@ -32,6 +32,7 @@
 //   flashback_framebuffer.c  capturing frames from the screen (with flashback_capture.s)
 //   flashback_compress.c     compressing frames (with flashback_pack.s)
 //   flashback_audio.c        recording the game's audio
+//   flashback_input.c        recording the inputs (buttons, Circle Pad, touch screen)
 //   flashback_record.c       the capture queue, staging, the writer, and starting
 //                            and stopping recording
 //   flashback_clip.c         saving clips
@@ -177,6 +178,18 @@ extern u32 g_capStride;
 extern u32 g_pendingMissed;
 extern LightEvent g_packEvent;
 
+// Inputs (flashback_input.c): a record of them for every grid slot, in a ring
+// of g_frames records in g_mem from g_inputOffset (flashbackLayout).
+typedef struct FlashbackInput {
+    u32 buttons;            // KEY_* held at any time during the frame (KEY_TOUCH: the touch screen)
+    s16 circleX, circleY;   // the Circle Pad, as HID reports it (about -156 to 156)
+    u16 touchX, touchY;     // where the touch screen was touched (with KEY_TOUCH)
+    s16 cstickX, cstickY;   // the C-Stick (New 3DS): not recorded yet, 0
+} FlashbackInput;
+_Static_assert(sizeof(FlashbackInput) == 16, "an input record is 16 bytes");
+
+extern u32 g_inputOffset;
+
 // Stats (flashback.c).
 extern volatile u32 g_statFpsX10;
 extern volatile u32 g_statCaptureUs;
@@ -204,6 +217,14 @@ void flashbackColumnsToRows(const u16 *cols, u32 width, u32 height, u16 *dst);
 
 // flashback_framebuffer.c
 bool flashbackCapture(u16 *dst);
+
+// flashback_input.c
+void flashbackInputReset(void);
+void flashbackInputResync(void);
+void flashbackInputPoll(void);
+void flashbackInputSample(u32 slots);
+void flashbackInputLatest(u32 count, FlashbackInput *dst);
+void flashbackInputSleepUntil(u64 tick);
 
 // flashback_audio.c
 void flashbackAudioSetCapture(bool on);

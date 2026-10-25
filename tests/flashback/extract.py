@@ -12,7 +12,7 @@ import sys
 SOURCE = sys.argv[1]
 FILES = [os.path.join(SOURCE, '..', 'include', 'flashback_internal.h')] + \
         [os.path.join(SOURCE, name) for name in ['flashback.c', 'flashback_compress.c', 'flashback_audio.c',
-                                                 'flashback_record.c', 'flashback_clip.c']]
+                                                 'flashback_input.c', 'flashback_record.c', 'flashback_clip.c']]
 FUNCTIONS = {
     # flashback.c
     'flashbackAudioFramesFor', 'flashbackLayout', 'flashbackSlotStride', 'flashbackVideoOffset',
@@ -24,13 +24,16 @@ FUNCTIONS = {
     'flashbackAudioSetCapture', 'flashbackAudioPause', 'flashbackAudioReset', 'flashbackAudioFramesIn',
     'flashbackAudioSamplesFor', 'flashbackAudioWanted', 'flashbackCounterNewer', 'flashbackAppendAudio',
     'flashbackAudioThreadMain',
+    # flashback_input.c
+    'flashbackHidNewReadings', 'flashbackInputRead', 'flashbackInputResync', 'flashbackInputReset',
+    'flashbackInputPoll', 'flashbackInputSample', 'flashbackInputLatest', 'flashbackInputSleepUntil',
     # flashback_record.c
     'flashbackWriteAudio', 'flashbackWritePending', 'flashbackWriterThreadMain', 'flashbackDrainWrites',
     'flashbackDrainCaptures', 'flashbackPackFrame', 'flashbackCaptureFrame', 'flashbackPackThreadMain',
     'flashbackFillMissed',
     # flashback_clip.c
     'flashbackPlanClip', 'flashbackPlanSlot', 'flashbackAudioOldest', 'flashbackAudioBase',
-    'flashbackAudioSampleOf', 'flashbackBuildClipIndex',
+    'flashbackAudioSampleOf', 'flashbackBuildClipInputs', 'flashbackBuildClipIndex',
 }
 
 

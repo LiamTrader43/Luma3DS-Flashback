@@ -337,6 +337,7 @@ Result flashbackStart(void)
     memset(g_repeat, 0, sizeof(g_repeat));
     g_pendingMissed = 0;    // (the capture queue is empty: flashbackStop drained it)
     flashbackAudioReset();
+    flashbackInputReset();
     g_writeFailed = false;
     g_ringLost = false;
     g_active = true;

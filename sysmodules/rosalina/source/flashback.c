@@ -106,10 +106,11 @@ u32 flashbackAudioFramesFor(u32 seconds)
 
 // Where things are in the recorder's memory, for g_stageSlots frames' worth of
 // staging, g_capBufs capture buffers and g_audioStageFrames of audio staging:
-// the staging first (the clip's index while saving, when it's empty: see
-// flashbackSaveClipFile), then the capture buffers, which hold frames as
-// captured (before compression), each with a column's worth after it that
-// compressing reads past the frame (flashbackCompress), then the audio staging.
+// the staging first (the clip's inputs and index while saving, when it's
+// empty: see flashbackSaveClipFile), then the capture buffers, which hold
+// frames as captured (before compression), each with a column's worth after it
+// that compressing reads past the frame (flashbackCompress), then the audio
+// staging, then the inputs' ring (flashback_input.c).
 void flashbackLayout(void)
 {
     g_stageBytes = g_stageSlots * g_slotStride;
@@ -119,6 +120,8 @@ void flashbackLayout(void)
     g_audioStageOffset = g_memSize;
     if (g_audio)
         g_memSize += (g_audioStageFrames * FLASHBACK_AUDIO_FRAME_BYTES + 0xFFF) & ~0xFFF;
+    g_inputOffset = g_memSize;
+    g_memSize += (g_frames * sizeof(FlashbackInput) + 0xFFF) & ~0xFFF;
 }
 
 // Every frame is written starting on a boundary of the card's internal blocks:
@@ -385,14 +388,19 @@ static void flashbackThreadMain(void)
         bool recording = g_enabled && g_active && !menuShouldExit && !menuIsOpen();
         flashbackAudioSetCapture(recording && g_audio);
         if (recording && !wasRecording)
+        {
             flashbackResetStats();
+            flashbackInputResync();     // (leaving out what was pressed in a menu)
+        }
         if (recording)
         {
             // Only the capture here: the packer thread compresses. A grid
             // slot without a capture becomes a copy of the frame before it,
-            // once that's packed (flashbackPackFrame).
+            // once that's packed (flashbackPackFrame). Either way, it gets a
+            // record of the inputs.
             if (!flashbackCaptureFrame())
                 g_pendingMissed++;
+            flashbackInputSample(1);
             flashbackUpdateStats();
         }
         wasRecording = recording;
@@ -424,7 +432,9 @@ static void flashbackThreadMain(void)
         // period to capture and write.
         nextTick += period;
         u64 now = svcGetSystemTick();
-        if (nextTick > now)
+        if (nextTick > now && recording)
+            flashbackInputSleepUntil(nextTick);     // (watching the inputs meanwhile)
+        else if (nextTick > now)
             svcSleepThread((s64)((nextTick - now) * 1000000000ULL / SYSCLOCK_ARM11));
         else if (recording)
         {
@@ -432,6 +442,7 @@ static void flashbackThreadMain(void)
             // slot (the one containing 'now') immediately, slightly late.
             u32 missed = (u32)((now - nextTick) / period);
             g_pendingMissed += missed;      // (copies, as above)
+            flashbackInputSample(missed);   // (the inputs as they are now)
             nextTick += (u64)missed * period;
         }
         else

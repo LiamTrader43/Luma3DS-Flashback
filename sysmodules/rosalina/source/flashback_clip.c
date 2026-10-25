@@ -98,6 +98,12 @@ static u32 flashbackAudioSampleOf(u32 frame)
 // Version 1, recorded without audio:
 //   [ring slots]    slot i at offset i * slotStride: a compressed frame, or the
 //                   raw frame if its size is slotBytes (see flashbackCompress)
+//   [inputs]        FlashbackClipInputs, then frameCount x FlashbackInput: the
+//                   inputs during each of the clip's frames, copies included
+//                   (see flashback_input.c). Where they start is the trailer's
+//                   inputOffset (0 in clips from before inputs were recorded).
+//                   Readers that don't know them skip them: they find the index
+//                   from the trailer.
 //   [index]         entryCount x { u32 slot, u32 size, u32 copies }: the clip's
 //                   frames oldest first, each slot shown 'copies' times
 //   [trailer]       FlashbackClipTrailer, the last 48 bytes of the file
@@ -106,6 +112,7 @@ static u32 flashbackAudioSampleOf(u32 frame)
 //   [audio ring]    audio.capacity stereo PCM16 samples: sample i (counting from
 //                   when the ring started) at audio.offset + (i % capacity) * 4
 //   [ring slots]    as in version 1, after the audio ring (from a 64 KB boundary)
+//   [inputs]        as in version 1
 //   [index]         entryCount x { u32 offset, u32 size, u32 copies, u32 audioPos }:
 //                   as in version 1, but with each frame's offset in the file,
 //                   and the audio sample at which it's first shown (each copy
@@ -130,9 +137,21 @@ typedef struct FlashbackClipTrailer {
     u32 entryCount;     // index entries
     u32 frameCount;     // frames in the clip, copies included
     u32 indexOffset;    // where the index starts
-    u32 reserved[2];
+    u32 inputOffset;    // where the inputs start (0: none)
+    u32 reserved;
 } FlashbackClipTrailer;
 _Static_assert(sizeof(FlashbackClipTrailer) == 48, "the clip trailer is 48 bytes");
+
+#define FLASHBACK_CLIP_INPUT_MAGIC      0x49424C46  // "FLBI"
+#define FLASHBACK_CLIP_INPUT_VERSION    1
+
+typedef struct FlashbackClipInputs {
+    u32 magic;
+    u32 version;
+    u32 count;          // records that follow: one per frame of the clip (frameCount)
+    u32 recordSize;     // sizeof(FlashbackInput)
+} FlashbackClipInputs;
+_Static_assert(sizeof(FlashbackClipInputs) == 16, "the clip inputs' header is 16 bytes");
 
 typedef struct FlashbackClipAudioInfo {
     u32 sampleRate;     // in millihertz
@@ -147,9 +166,22 @@ typedef struct FlashbackClipAudioInfo {
 } FlashbackClipAudioInfo;
 _Static_assert(sizeof(FlashbackClipAudioInfo) == 32, "the clip audio info is 32 bytes");
 
+// Builds the clip's inputs (a record for every frame, copies included) into
+// 'buf'; returns their size.
+static u32 flashbackBuildClipInputs(const FlashbackClipPlan *plan, u8 *buf)
+{
+    FlashbackClipInputs *h = (FlashbackClipInputs *)buf;
+    h->magic = FLASHBACK_CLIP_INPUT_MAGIC;
+    h->version = FLASHBACK_CLIP_INPUT_VERSION;
+    h->count = plan->frames;
+    h->recordSize = sizeof(FlashbackInput);
+    flashbackInputLatest(plan->frames, (FlashbackInput *)(h + 1));
+    return sizeof(*h) + plan->frames * sizeof(FlashbackInput);
+}
+
 // Builds the clip's index, audio info (with audio) and trailer into 'buf';
 // returns their size.
-static u32 flashbackBuildClipIndex(const FlashbackClipPlan *plan, u32 indexOffset, u8 *buf)
+static u32 flashbackBuildClipIndex(const FlashbackClipPlan *plan, u32 indexOffset, u32 inputOffset, u8 *buf)
 {
     u32 *entry = (u32 *)buf;
     for (u32 i = 0; i < plan->slots; i++)
@@ -200,14 +232,17 @@ static u32 flashbackBuildClipIndex(const FlashbackClipPlan *plan, u32 indexOffse
     t->entryCount = plan->slots;
     t->frameCount = plan->frames;
     t->indexOffset = indexOffset;
+    t->inputOffset = inputOffset;
     return (u32)((u8 *)(t + 1) - buf);
 }
 
-// The clip's index is built in staging, at least FLASHBACK_STAGE_SLOTS_MIN
-// frames' worth (and empty while saving: see flashbackSave).
-_Static_assert(FLASHBACK_MAX_FRAMES * 16 + sizeof(FlashbackClipAudioInfo) + sizeof(FlashbackClipTrailer) <=
+// The clip's inputs and index are built in staging, at least
+// FLASHBACK_STAGE_SLOTS_MIN frames' worth (and empty while saving: see
+// flashbackSave).
+_Static_assert(sizeof(FlashbackClipInputs) + FLASHBACK_MAX_FRAMES * (sizeof(FlashbackInput) + 16) +
+                   sizeof(FlashbackClipAudioInfo) + sizeof(FlashbackClipTrailer) <=
                    FLASHBACK_STAGE_SLOTS_MIN * 200 * 120 * 2,
-               "a clip's index fits in staging at half resolution");
+               "a clip's inputs and index fit in staging at half resolution");
 
 // Saves the clip by turning the ring file into it, then starts a fresh ring.
 // Needs the writer to be idle (flashbackDrainWrites).
@@ -221,8 +256,9 @@ static s32 flashbackSaveClipFile(FS_Archive archive, const char *clip, const Fla
     // The ring always starts at slot 0, so until it has wrapped once the clip
     // only uses its first g_count slots: the rest can be trimmed off.
     u32 dataEnd = g_videoOffset + (g_count < g_frames ? g_count : g_frames) * g_slotStride;
-    u8 *index = g_mem;                  // staging: empty while saving (everything's written)
-    u32 indexSize = flashbackBuildClipIndex(plan, dataEnd, index);
+    u8 *tail = g_mem;                   // staging: empty while saving (everything's written)
+    u32 inputSize = flashbackBuildClipInputs(plan, tail);
+    u32 tailSize = inputSize + flashbackBuildClipIndex(plan, dataEnd + inputSize, dataEnd, tail + inputSize);
 
     IFile_Close(&g_ring);
     if (R_FAILED(FSUSER_RenameFile(archive, fsMakePath(PATH_ASCII, FLASHBACK_RING_FILE),
@@ -240,7 +276,7 @@ static s32 flashbackSaveClipFile(FS_Archive archive, const char *clip, const Fla
     if (ok)
     {
         file.pos = dataEnd;
-        ok = R_SUCCEEDED(IFile_Write(&file, &total, index, indexSize, 0)) && total == indexSize;
+        ok = R_SUCCEEDED(IFile_Write(&file, &total, tail, tailSize, 0)) && total == tailSize;
     }
     IFile_Close(&file);
     if (!ok)
@@ -255,6 +291,7 @@ static s32 flashbackSaveClipFile(FS_Archive archive, const char *clip, const Fla
     g_count = 0;
     memset(g_repeat, 0, sizeof(g_repeat));
     flashbackAudioReset();
+    flashbackInputReset();
     if (R_FAILED(flashbackOpenRing(archive)))
         g_ringLost = true;  // no space for a new ring: the capture thread stops recording
     return result;

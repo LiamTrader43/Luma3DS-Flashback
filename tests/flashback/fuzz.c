@@ -3,7 +3,9 @@
    staging (every size it can have), audio staging, the writer (audio chunks
    and video frames), unfinished-chunk flushes for saves, saves that reset the
    ring and saves that fail and carry on, write failures, staging running
-   full, every clip length and frame rate, audio on and off.
+   full, every clip length and frame rate, audio on and off, and the inputs'
+   records (HID taking readings between grid slots and during them, more than
+   it holds at times, and the recorder waking up late).
 
    The producers (audio frames, video frames) run in the middle of the
    writer's SD writes, and the "card" only takes the data at the end of each
@@ -12,7 +14,7 @@
    After every drain it checks, exactly: the audio ring holds every audio frame
    it should (by content), every buffered video slot holds the right frame,
    each slot's audio position is where the audio was when the frame was
-   captured, and the clip index/audio info a save would write. */
+   captured, and the clip's inputs, index and audio info a save would write. */
 #include "stubs_fuzz.h"
 /* Staged frames start on 512-byte boundaries here (a page on the 3DS): with the
    tiny frames below, that packs 1 to 4 to a slot, as real frames do to a page
@@ -86,6 +88,83 @@ static void modelPacked(u32 before)
     }
 }
 
+/* ---- inputs: a fake of HID's shared memory (as flashback_input.c reads it),
+   and what the records should be */
+static u32 g_padTotal, g_padSeen, g_touchTotal, g_touchSeen;   /* readings so far, and the newest looked at */
+static FlashbackInput g_mInputNow, g_mInputNewest;
+static FlashbackInput g_mInputs[FLASHBACK_MAX_FRAMES];           /* the records, one per grid slot (round) */
+static u32 g_mInputCount;
+static long g_inputsChecked, g_inputOverruns;
+
+/* what reading r holds (reading 0: HID's memory as it starts, all zero) */
+static u32 heldOf(u32 r)     { u32 h = r * 2654435761u; return r ? (h >> 9 & 0xFFF) | (h & 0xF0000000) : 0; }
+static u32 circleOf(u32 r)   { return r ? (r & 0xFFFF) | (r * 3 & 0xFFFF) << 16 : 0; }
+static bool touchedOf(u32 t) { return t && t / 4 % 3 == 0; }
+static u32 posOf(u32 t)      { return t ? t % 320 | (t * 7 % 240) << 16 : 0; }
+static void put64(u32 *w, u64 v) { w[0] = (u32)v; w[1] = (u32)(v >> 32); }
+
+/* HID takes a reading of the pad (and, every other time or so, the touch screen) */
+static void hidReading(void)
+{
+    u32 r = ++g_padTotal, i = r % 8;
+    g_fakeHid[10 + i * 4] = heldOf(r);
+    g_fakeHid[10 + i * 4 + 3] = circleOf(r);
+    put64(g_fakeHid + 2, r - 1);    /* (when the one before was taken, and this one) */
+    put64(g_fakeHid + 0, r);
+    g_fakeHid[4] = i;
+    if (rand() % 2)
+    {
+        u32 t = ++g_touchTotal, j = t % 8;
+        g_fakeHid[50 + j * 2] = posOf(t);
+        g_fakeHid[51 + j * 2] = touchedOf(t);
+        put64(g_fakeHid + 44, t - 1);
+        put64(g_fakeHid + 42, t);
+        g_fakeHid[46] = j;
+    }
+}
+
+/* What a look at HID gives: the readings since the last look that it still
+   holds (its 8 newest), added to the record under way. */
+static void modelLook(bool discard)
+{
+    u32 held = 0, pos = 0;
+    bool touched = false;
+    if (g_padTotal > g_padSeen + 8) g_inputOverruns++;
+    for (u32 r = g_padTotal > g_padSeen + 8 ? g_padTotal - 7 : g_padSeen + 1; r <= g_padTotal; r++)
+        held |= heldOf(r);
+    for (u32 t = g_touchTotal > g_touchSeen + 8 ? g_touchTotal - 7 : g_touchSeen + 1; t <= g_touchTotal; t++)
+        if (touchedOf(t)) { touched = true; pos = posOf(t); }  /* (the newest touched one) */
+    g_padSeen = g_padTotal;
+    g_touchSeen = g_touchTotal;
+
+    bool on = touchedOf(g_touchTotal);
+    FlashbackInput newest = { heldOf(g_padTotal) | (on ? KEY_TOUCH : 0),
+                              (s16)circleOf(g_padTotal), (s16)(circleOf(g_padTotal) >> 16),
+                              on ? (u16)posOf(g_touchTotal) : 0, on ? (u16)(posOf(g_touchTotal) >> 16) : 0, 0, 0 };
+    g_mInputNewest = newest;
+    if (discard)
+        g_mInputNow = newest;
+    else
+    {
+        g_mInputNow.buttons |= held | (touched ? KEY_TOUCH : 0);
+        g_mInputNow.circleX = newest.circleX;
+        g_mInputNow.circleY = newest.circleY;
+        if (touched) { g_mInputNow.touchX = (u16)pos; g_mInputNow.touchY = (u16)(pos >> 16); }
+    }
+}
+
+/* records for 'slots' grid slots: the one under way, then copies of the newest readings */
+static void modelSample(u32 slots)
+{
+    if (slots == 0) return;
+    modelLook(false);
+    for (u32 i = 0; i < slots; i++)
+    {
+        g_mInputs[g_mInputCount++ % FLASHBACK_MAX_FRAMES] = g_mInputNow;
+        g_mInputNow = g_mInputNewest;
+    }
+}
+
 static long g_queuedAfterCapture, g_queueDepthMax, g_fullCard, g_fullCpu;
 static long g_stagedMax, g_stagedOverSlots, g_wraps;
 static u32 g_lastHead;
@@ -97,8 +176,18 @@ static void stageStats(void)
     if (g_stageHead < g_lastHead) g_wraps++;
     g_lastHead = g_stageHead;
 }
+/* One grid slot, as flashbackThreadMain records it */
 static void recordVideo(void)
 {
+    /* HID's readings since the last grid slot (looked at now and then
+       meanwhile, as the recorder thread does while it waits): sometimes more
+       than it holds */
+    for (int n = rand() % 20 == 0 ? 9 + rand() % 12 : rand() % 4; n > 0; n--)
+    {
+        hidReading();
+        if (rand() % 6 == 0) { flashbackInputPoll(); modelLook(false); }
+    }
+
     u32 frame = g_audioProduced, before = g_capConsumed, id = g_nextId;
     if (flashbackCaptureFrame())
     {
@@ -115,6 +204,18 @@ static void recordVideo(void)
             else g_fullCpu++;
         }
         g_pendingMissed++;
+    }
+    flashbackInputSample(1);
+    modelSample(1);
+
+    /* now and then the thread wakes up late: grid slots missed after this one */
+    if (rand() % 40 == 0)
+    {
+        u32 n = 1 + rand() % 3;
+        if (rand() % 2) hidReading();
+        g_pendingMissed += n;
+        flashbackInputSample(n);
+        modelSample(n);
     }
     modelPacked(before);
     stageStats();
@@ -198,16 +299,40 @@ static void check(void)
         videoChecked++;
     }
 
-    /* what a save would append */
+    /* what a save would append: the inputs (a record for each of the clip's
+       frames: the last ones, by grid slot), then the index */
     if (g_count == 0) return;
     FlashbackClipPlan plan = flashbackPlanClip();
     u32 dataEnd = RING_VIDEO_BASE + (g_count < g_frames ? g_count : g_frames) * g_slotStride;
+    static u8 ibuf[16 + FLASHBACK_MAX_FRAMES * 16];
+    u32 isize = flashbackBuildClipInputs(&plan, ibuf);
+    const u32 *ih = (const u32 *)ibuf;
+    if (isize != 16 + plan.frames * 16 || ih[0] != 0x49424C46 || ih[1] != 1 || ih[2] != plan.frames || ih[3] != 16)
+        FAIL("inputs header\n");
+    if (plan.frames > g_mInputCount)
+        FAIL("%u frames, but only %u input records\n", plan.frames, g_mInputCount);
+    else
+        for (u32 f = 0; f < plan.frames; f++)
+        {
+            const FlashbackInput *got = (const FlashbackInput *)(ibuf + 16) + f;
+            const FlashbackInput *want = &g_mInputs[(g_mInputCount - plan.frames + f) % FLASHBACK_MAX_FRAMES];
+            if (memcmp(got, want, sizeof(*got)) != 0)
+            {
+                FAIL("frame %u of %u's inputs: %08x %d,%d %u,%u; want %08x %d,%d %u,%u\n", f, plan.frames,
+                     got->buttons, got->circleX, got->circleY, got->touchX, got->touchY,
+                     want->buttons, want->circleX, want->circleY, want->touchX, want->touchY);
+                break;
+            }
+            g_inputsChecked++;
+        }
+
     static u8 buf[FLASHBACK_MAX_FRAMES * 16 + 128];
-    u32 size = flashbackBuildClipIndex(&plan, dataEnd, buf);
+    u32 size = flashbackBuildClipIndex(&plan, dataEnd + isize, dataEnd, buf);
     u32 es = g_audio ? 16 : 12;
     if (size != plan.slots * es + (g_audio ? 32 : 0) + 48) FAIL("index size\n");
     const u32 *t = (const u32 *)(buf + size - 48);
-    if (t[0] != 0x4B424C46 || t[1] != (g_audio ? 3u : 1u) || t[7] != plan.slots || t[8] != plan.frames || t[9] != dataEnd)
+    if (t[0] != 0x4B424C46 || t[1] != (g_audio ? 3u : 1u) || t[7] != plan.slots || t[8] != plan.frames ||
+        t[9] != dataEnd + isize || t[10] != dataEnd || t[11] != 0)
         FAIL("trailer\n");
     for (u32 i = 0; i < plan.slots; i++)
     {
@@ -243,6 +368,9 @@ static void startRing(void)
     g_head = 0; g_count = 0;
     memset(g_repeat, 0, sizeof(g_repeat));
     flashbackAudioReset();
+    flashbackInputReset();
+    g_mInputCount = 0;
+    modelLook(true);
     g_writeFailed = false;
     /* every other ring: counts start just before 2^32 samples (~36.4 hours in),
        so the run crosses it */
@@ -272,6 +400,7 @@ int main(void)
         flashbackLayout();
 
         g_mem = calloc(1, g_memSize);
+        g_active = true;
         g_ring.size = RING_VIDEO_BASE + (u64)g_frames * g_slotStride;
         g_ring.data = malloc(g_ring.size);
         startRing();
@@ -305,6 +434,8 @@ int main(void)
            runs, checks, saves, failedSaves, failStops);
     printf("audio frames checked %ld, video slots checked %ld, appends refused (staging full) %ld\n",
            audioChecked, videoChecked, stagingFull);
+    printf("inputs: records checked %ld, times HID took more readings than it holds between looks %ld\n",
+           g_inputsChecked, g_inputOverruns);
     printf("SD writes %ld, not sector aligned %ld\n", g_writes, g_unaligned);
     if (g_unaligned) errors++;
     printf("queue: frames left waiting after a capture %ld, deepest %ld; refused with it full: %ld (card behind too), %ld (not)\n", g_queuedAfterCapture, g_queueDepthMax, g_fullCard, g_fullCpu);

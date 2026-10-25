@@ -19,7 +19,7 @@ typedef volatile u16 vu16; typedef volatile u32 vu32;
 #define SYSCLOCK_ARM11 (SYSCLOCK_SOC * 2 * 4 * 2)
 #define _Static_assert(a, b)
 enum { KEY_A = 1, KEY_B = 2, KEY_SELECT = 4, KEY_START = 8, KEY_DRIGHT = 16, KEY_DLEFT = 32, KEY_DUP = 64,
-       KEY_DDOWN = 128, KEY_R = 256, KEY_L = 512, KEY_X = 1024, KEY_Y = 2048, KEY_ZL = 4096, KEY_ZR = 8192 };
+       KEY_DDOWN = 128, KEY_R = 256, KEY_L = 512, KEY_X = 1024, KEY_Y = 2048, KEY_ZL = 4096, KEY_ZR = 8192, KEY_TOUCH = 1 << 20 };
 #define FLASHBACK_DEFAULT_SAVE_COMBO (KEY_L | KEY_R | KEY_DDOWN)
 
 typedef struct MyThread { int dummy; } MyThread;
@@ -91,5 +91,13 @@ static u8 g_fakeDsp[0x28000];
 
 /* Video frames: noise (so they're stored uncompressed) carrying an id */
 static volatile u32 g_nextFrameId;
+
+/* HID's shared memory (flashback_input.c reads it; the tests write it), and
+   the Rosalina lock it's read under */
+static u32 g_fakeHid[0x80];
+static vu32 *hidSharedMem = g_fakeHid;
+static bool isHidInitialized = true;
+static void Draw_Lock(void) {}
+static void Draw_Unlock(void) {}
 
 static bool flashbackCapture(u16 *dst);

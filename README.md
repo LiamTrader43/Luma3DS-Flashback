@@ -12,7 +12,7 @@
 
 ## Flashback recorder
 
-Flashback is a "replay buffer" for the 3DS top screen. While recording is on, it keeps the **last 30 seconds** of gameplay, with sound (adjustable from 10 seconds to 2 minutes). When something worth keeping happens, press a button combo and those seconds are saved to the SD card as a video file.
+Flashback is a "replay buffer" for the 3DS top screen. While recording is on, it keeps the **last 30 seconds** of gameplay (adjustable from 10 seconds to 2 minutes), with sound and the buttons you press. When something worth keeping happens, press a button combo and those seconds are saved to the SD card as a video file.
 
 It is built into Rosalina, so it works in **any game**, including retail games, without plugins. It uses none of the game's memory and has no noticeable effect on game performance.
 
@@ -61,6 +61,8 @@ The last two lines show where the time goes, averaged over the last second or so
 
 **Audio.** Flashback records the game's sound with the picture: the final mix the 3DS's sound chip sends to the speakers, read from the memory it shares with the game. It's on by default; <kbd>Start</kbd> turns it off. It adds about 131 KB per second (8 MB for a minute) to the buffer and clips, and converted MP4s get it as an AAC track. If the recorder ever misses a moment of audio (5 ms at a time; it rarely does), that moment is silent in the clip and counted as **missed**.
 
+**Inputs.** Flashback also records what you press, for every frame: the buttons held at any time during it (so a quick tap shows too), where the Circle Pad was, and where the touch screen was touched. Flashback Studio can show them over the clip (see below); converted MP4s don't include them yet. Buttons pressed while a Rosalina menu is open are left out, and <kbd>ZL</kbd>, <kbd>ZR</kbd> and the C-Stick aren't recorded yet. The inputs add under 60 KB to a 2-minute clip.
+
 **Changing the save hotkey:** press <kbd>Select</kbd>, hold the new combination (at least 2 buttons), then let go. If the combination can't be used, press <kbd>A</kbd> to try again. Combos that overlap the Rosalina menu combo aren't allowed.
 
 You can use <kbd>A</kbd>, <kbd>B</kbd>, <kbd>X</kbd>, <kbd>Y</kbd>, <kbd>L</kbd>, <kbd>R</kbd>, <kbd>Start</kbd>, <kbd>Select</kbd> and the D-Pad. **<kbd>ZL</kbd>, <kbd>ZR</kbd> and the C-Stick on New 3DS/2DS can't be used**: the system reports them through a separate input service that Rosalina doesn't read, so it never sees them being pressed. That's the same reason they can't be part of the Rosalina menu combo. The touchscreen and Circle Pad can't be used either.
@@ -80,7 +82,7 @@ To convert clips (Windows):
 
 Each clip becomes an MP4 next to it, at twice the size with sharp pixels. It plays in any video player and imports into video editors like DaVinci Resolve. Clips that already have an MP4 are skipped, and a clip that was copied incompletely is reported instead of converted. Clips saved by older Flashback builds (`.raw` with a `.txt`) convert the same way.
 
-To watch clips on the 3DS itself, use the **Flashback Studio** app (a `.3dsx` for the Homebrew Launcher, or a `.cia` to install) from the [latest Flashback-Studio release](https://github.com/LiamTrader43/Flashback-Studio/releases/latest). It plays them on the top screen with their sound, and can compact a clip to about half its size so it copies to a PC faster.
+To watch clips on the 3DS itself, use the **Flashback Studio** app (a `.3dsx` for the Homebrew Launcher, or a `.cia` to install) from the [latest Flashback-Studio release](https://github.com/LiamTrader43/Flashback-Studio/releases/latest). It plays them on the top screen with their sound, can show the buttons you pressed over the picture, and can compact a clip to about half its size so it copies to a PC faster.
 
 ### SD card usage
 

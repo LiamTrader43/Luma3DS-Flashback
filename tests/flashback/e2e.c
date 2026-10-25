@@ -119,11 +119,27 @@ static bool flashbackCapture(u16 *dst)
 static long errors;
 #define FAIL(...) do { errors++; if (errors < 30) printf("  ERROR: " __VA_ARGS__); } while (0)
 
+/* HID: a reading each time round the recording loop, its number in the
+   Circle Pad's x. While a menu is open, SELECT is held (as when choosing in
+   the menu): that must never show in a clip. */
+static u32 g_hidN;
+static void hidReading(bool inMenu)
+{
+    u32 r = ++g_hidN, i = r % 8;
+    g_fakeHid[10 + i * 4] = inMenu ? KEY_SELECT : (r & 1 ? KEY_A : 0);
+    g_fakeHid[10 + i * 4 + 3] = r & 0x7FFF;
+    g_fakeHid[2] = g_fakeHid[0];    /* (when the one before was taken, and this one) */
+    g_fakeHid[3] = g_fakeHid[1];
+    g_fakeHid[0] = r;
+    g_fakeHid[1] = 0;
+    g_fakeHid[4] = i;
+}
+
 
 static void record(double seconds, const Events *ev)
 {
     u64 period = SYSCLOCK_ARM11 / g_fps, start = svcGetSystemTick(), next = start;
-    bool held12 = false, held30 = false, didReset = false, didStall = false;
+    bool held12 = false, held30 = false, didReset = false, didStall = false, wasRecording = false;
     g_recordStart = start;
     g_freezeEv = ev;
     for (;;)
@@ -140,14 +156,27 @@ static void record(double seconds, const Events *ev)
             if (!didReset && ev->resetAt > 0 && t >= ev->resetAt) { g_dspReset = true; didReset = true; }
         }
         bool recording = !paused;
+        hidReading(paused);
         flashbackAudioSetCapture(recording && g_audio);     /* (as flashbackThreadMain) */
+        if (recording && !wasRecording)
+            flashbackInputResync();
         if (ev && ev->stallSdAt > 0 && !didStall && t >= ev->stallSdAt) { g_sdStallMs = 800; didStall = true; }
         if (recording && !flashbackCaptureFrame())
             g_pendingMissed++;
+        if (recording)
+            flashbackInputSample(1);
+        wasRecording = recording;
         next += period;
         u64 now = svcGetSystemTick();
-        if (next > now) svcSleepThread((s64)((next - now) * 1e9 / SYSCLOCK_ARM11));
-        else if (recording) { u32 missed = (u32)((now - next) / period); g_pendingMissed += missed; next += (u64)missed * period; }
+        if (next > now && recording) flashbackInputSleepUntil(next);
+        else if (next > now) svcSleepThread((s64)((next - now) * 1e9 / SYSCLOCK_ARM11));
+        else if (recording)
+        {
+            u32 missed = (u32)((now - next) / period);
+            g_pendingMissed += missed;
+            flashbackInputSample(missed);
+            next += (u64)missed * period;
+        }
         else next = now;
     }
     g_dspStalled = false;
@@ -162,17 +191,19 @@ static u8 *saveClip(u32 *size)
     flashbackDrainWrites();
     FlashbackClipPlan plan = flashbackPlanClip();
     u32 dataEnd = RING_VIDEO_BASE + (g_count < g_frames ? g_count : g_frames) * g_slotStride;
-    u8 *index = malloc(64 * 1024);
-    u32 indexSize = flashbackBuildClipIndex(&plan, dataEnd, index);
-    u8 *clip = malloc(dataEnd + indexSize);
+    u8 *tail = malloc(128 * 1024);
+    u32 inputSize = flashbackBuildClipInputs(&plan, tail);
+    u32 tailSize = inputSize + flashbackBuildClipIndex(&plan, dataEnd + inputSize, dataEnd, tail + inputSize);
+    u8 *clip = malloc(dataEnd + tailSize);
     memcpy(clip, g_ring.data, dataEnd);
-    memcpy(clip + dataEnd, index, indexSize);
-    free(index);
-    *size = dataEnd + indexSize;
+    memcpy(clip + dataEnd, tail, tailSize);
+    free(tail);
+    *size = dataEnd + tailSize;
     g_head = 0;
     g_count = 0;
     memset(g_repeat, 0, sizeof(g_repeat));
     flashbackAudioReset();
+    flashbackInputReset();
     return clip;
 }
 
@@ -192,6 +223,29 @@ static void check(const char *name, const u8 *clip, u32 size, int expectJumps)
     /* (positions count from a whole number of rings back: 'first' is 0 only if the ring holds everything since it started) */
     if (end - first != (first == 0 ? end : cap - FLASHBACK_AUDIO_CHUNK_FRAMES * 160) || end > 3 * cap) FAIL("held range\n");
     if (version != 3 || magic_check(t) || indexOffset + entries * 16 + 32 + 48 != size) FAIL("layout\n");
+
+    /* inputs: a record for every frame, just before the index; in order (the
+       Circle Pad's x is the reading's number: the same again only for grid
+       slots missed by waking late, a jump only across a menu pause), none
+       from while a menu was open, and the last one the newest reading */
+    u32 inputOffset = rd32(t + 40), inputJumps = 0;
+    const u8 *ih = clip + inputOffset;
+    if (inputOffset == 0 || rd32(ih) != 0x49424C46 || rd32(ih + 4) != 1 || rd32(ih + 8) != frames || rd32(ih + 12) != 16 ||
+        inputOffset + 16 + frames * 16 != indexOffset)
+        FAIL("inputs: layout\n");
+    else
+    {
+        const FlashbackInput *in = (const FlashbackInput *)(ih + 16);
+        for (u32 i = 0; i < frames; i++)
+        {
+            if (in[i].buttons & KEY_SELECT) { FAIL("inputs: frame %u has buttons pressed in a menu\n", i); break; }
+            if (i > 0 && in[i].circleX < in[i - 1].circleX) { FAIL("inputs: frame %u out of order\n", i); break; }
+            if (i > 0 && in[i].circleX > in[i - 1].circleX + 1) inputJumps++;
+        }
+        if (in[frames - 1].circleX != (s16)(g_hidN & 0x7FFF)) FAIL("inputs: the last frame's aren't the newest\n");
+        if (expectJumps >= 0 && (int)inputJumps > expectJumps) FAIL("inputs: %u jumps, more than the pauses\n", inputJumps);
+    }
+    printf("  inputs: %u records, %u jumps (menu pauses)\n", frames, inputJumps);
 
     /* video: ids in order; audio at each clip frame lines up with the DSP at capture time */
     u32 lastId = 0, f = 0, silentFrames = 0, maxOff = 0;
@@ -283,6 +337,7 @@ int main(void)
     g_ring.data = calloc(1, g_ring.size);
     g_head = 0; g_count = 0; flashbackAudioReset();
     g_active = true;
+    flashbackInputReset();
     g_writerRunning = true;
     g_audioRunning = true;
     LightEvent_Init(&g_writeEvent);
