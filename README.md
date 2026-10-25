@@ -16,6 +16,8 @@ Flashback is a "replay buffer" for the 3DS top screen. While recording is on, it
 
 It is built into Rosalina, so it works in **any game**, including retail games, without plugins. It uses none of the game's memory and has no noticeable effect on game performance.
 
+It records at **full resolution and 30 fps on both the Old and New 3DS/2DS**. What it needs most is a **good SD card**: some cards slow down for seconds at a time, which makes it drop frames, especially on an Old 3DS/2DS (see [Limitations](#limitations)).
+
 ### Installing
 
 Flashback is a complete Luma3DS build, so it needs [boot9strap](https://github.com/SciresM/boot9strap) like regular Luma3DS. Download `boot.firm` from [this fork's latest release](https://github.com/LiamTrader43/Luma3DS-Flashback/releases/latest), then choose one of these:
@@ -100,6 +102,10 @@ A saved clip is the buffer file itself, so it's the same size (smaller if you sa
 * **SD card only**: Flashback is disabled when Luma3DS boots from the internal memory (NAND).
 * **Old 3DS/2DS are slower**: they have a much slower CPU, so higher settings can make games run slower. They still default to full resolution at 30 fps: in testing, an Old 3DS recorded Mario Kart 7 that way with only a few dropped frames per race. If a game slows down or drops many frames, lower the resolution or frame rate.
 * **Some SD cards slow right down for seconds at a time**: frames that come meanwhile wait in memory to be written. A New 3DS/2DS has memory to spare, so Flashback uses up to about 25 MB of it for that while recording (only while plenty is left for the rest of the system), and waits out over ten seconds of it: in testing, a SanDisk Ultra card that had dropped over 100 frames a minute dropped none. An Old 3DS/2DS has little memory to spare, so there a card like that drops frames even though **write** is under the budget on average. A faster card fixes it (a Samsung EVO Plus dropped none in the same game), or a lower frame rate or resolution helps.
+
+### Working on Flashback
+
+The recorder's code is in `sysmodules/rosalina/source/flashback*.c` and its two `.s` files. [`flashback_internal.h`](sysmodules/rosalina/include/flashback_internal.h) lists what each file does. [`docs/flashback-design.md`](docs/flashback-design.md) explains the measurements and reasoning behind the recorder's numbers and rules. [`tests/flashback`](tests/flashback) has PC tests that run the recorder's own code: `python tests/flashback/run_tests.py` (see its [README](tests/flashback/README.md) for what you need).
 
 ## Description
 **Luma3DS** patches and reimplements significant parts of the system software running on all models of the Nintendo 3DS family of consoles. It aims to greatly improve the user experience and support the 3DS far beyond its end-of-life. Features include:
