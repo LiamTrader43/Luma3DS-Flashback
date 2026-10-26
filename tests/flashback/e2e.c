@@ -274,7 +274,7 @@ static void check(const char *name, const u8 *clip, u32 size, int expectJumps)
     }
     printf("  video frame -> audio: max %u DSP frames from the DSP at capture time, %u frames on silence\n", maxOff, silentFrames);
 
-    /* the converter and the app play the audio straight through from the first
+    /* Flashback Studio (3DS and Windows) plays the audio straight through from the first
        frame: how far is each frame from its recorded audio position, played so? */
     {
         u32 start = rd32(clip + indexOffset + 12), fr = 0;

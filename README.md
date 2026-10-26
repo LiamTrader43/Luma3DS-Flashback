@@ -12,7 +12,7 @@
 
 ## Flashback recorder
 
-Flashback is a "replay buffer" for the 3DS top screen. While recording is on, it keeps the **last 30 seconds** of gameplay (adjustable from 10 seconds to 2 minutes), with sound and the buttons you press. When something worth keeping happens, press a button combo and those seconds are saved to the SD card as a video file.
+Flashback is a "replay buffer" for the 3DS top screen. While recording is on, it keeps the **last 30 seconds** of gameplay (adjustable from 10 seconds to 2 minutes), with sound and the buttons you press. When something worth keeping happens, press a button combo and those seconds are saved to the SD card as a clip, which [Flashback Studio](#where-clips-are-saved-and-how-to-watch-them) plays and turns into a video.
 
 It is built into Rosalina, so it works in **any game**, including retail games, without plugins. It uses none of the game's memory and has no noticeable effect on game performance.
 
@@ -59,9 +59,9 @@ The last two lines show where the time goes, averaged over the last second or so
 
 **Raw** is how many frames are stored as they are, without compressing. When the processor can't keep up compressing every frame (an Old 3DS at full resolution), the recorder skips compressing some of them whenever the SD card has time to spare (and, when a frame would otherwise be dropped, a little more often), so the two share the load: that keeps the frame rate up, at the cost of writing more. It stays near 0% when the recorder keeps up, as a New 3DS does. **Compress** and **compressed to** include those frames (at their full size).
 
-**Audio.** Flashback records the game's sound with the picture: the final mix the 3DS's sound chip sends to the speakers, read from the memory it shares with the game. It's on by default; <kbd>Start</kbd> turns it off. It adds about 131 KB per second (8 MB for a minute) to the buffer and clips, and converted MP4s get it as an AAC track. If the recorder ever misses a moment of audio (5 ms at a time; it rarely does), that moment is silent in the clip and counted as **missed**.
+**Audio.** Flashback records the game's sound with the picture: the final mix the 3DS's sound chip sends to the speakers, read from the memory it shares with the game. It's on by default; <kbd>Start</kbd> turns it off. It adds about 131 KB per second (8 MB for a minute) to the buffer and clips, and exported MP4s get it as an AAC track. If the recorder ever misses a moment of audio (5 ms at a time; it rarely does), that moment is silent in the clip and counted as **missed**.
 
-**Inputs.** Flashback also records what you press, for every frame: the buttons held at any time during it (so a quick tap shows too), where the Circle Pad was, and where the touch screen was touched. Flashback Studio can show them over the clip (see below); converted MP4s don't include them yet. Buttons pressed while a Rosalina menu is open are left out, and <kbd>ZL</kbd>, <kbd>ZR</kbd> and the C-Stick aren't recorded yet. The inputs add under 60 KB to a 2-minute clip.
+**Inputs.** Flashback also records what you press, for every frame: the buttons held at any time during it (so a quick tap shows too), where the Circle Pad was, and where the touch screen was touched. Flashback Studio can show them over the clip, and draw them into exported MP4s (see below). Buttons pressed while a Rosalina menu is open are left out, and <kbd>ZL</kbd>, <kbd>ZR</kbd> and the C-Stick aren't recorded yet. The inputs add under 60 KB to a 2-minute clip.
 
 **Changing the save hotkey:** press <kbd>Select</kbd>, hold the new combination (at least 2 buttons), then let go. If the combination can't be used, press <kbd>A</kbd> to try again. Combos that overlap the Rosalina menu combo aren't allowed.
 

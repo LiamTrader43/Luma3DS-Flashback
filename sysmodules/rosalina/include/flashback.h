@@ -32,8 +32,7 @@
 // resolution at 10, 20 or 30 fps, compressed losslessly, and written to a ring
 // file on the SD card holding the last 10 seconds to 2 minutes. Saving turns
 // that ring file into the clip (/luma/flashback/clip_<date>.flb, decoded by
-// Flashback-Studio: convert_flashback.bat on a PC, or its 3DS app) and starts a
-// new one.
+// Flashback-Studio: its Windows app, or its 3DS app) and starts a new one.
 //
 // Uncompressed, a second of footage is 1.4 MB at half resolution and 30 fps,
 // and 5.8 MB at full resolution and 30 fps (the ring file is sized for that).

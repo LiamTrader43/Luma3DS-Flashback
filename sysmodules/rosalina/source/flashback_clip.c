@@ -90,9 +90,9 @@ static u32 flashbackAudioSampleOf(u32 frame)
 
 // Clip file format (<clip>.flb): the ring file itself, renamed, with an index
 // and a trailer appended. Saving this way copies no frame or audio data, so it
-// takes a few seconds however long the clip is; the PC-side converter
-// (convert_flashback.bat, in https://github.com/LiamTrader43/Flashback-Studio)
-// decodes it into a video, and Flashback Studio plays it on the 3DS. Keep
+// takes a few seconds however long the clip is; Flashback Studio
+// (https://github.com/LiamTrader43/Flashback-Studio) plays it on Windows and
+// the 3DS, and on Windows exports it as a video. Keep
 // those readers in step with any change here.
 //
 // Version 1, recorded without audio:
