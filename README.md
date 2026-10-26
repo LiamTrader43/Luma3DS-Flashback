@@ -71,18 +71,12 @@ You can use <kbd>A</kbd>, <kbd>B</kbd>, <kbd>X</kbd>, <kbd>Y</kbd>, <kbd>L</kbd>
 
 Clips are saved in `/luma/flashback/` on the SD card as `clip_<date>.flb` files, named after the date and time they were saved.
 
-> **`.flb` clips can only be turned into videos with `convert_flashback.bat`** from [Flashback-Studio](https://github.com/LiamTrader43/Flashback-Studio). They use Flashback's own compressed format, so video players, video editors and other tools (plain ffmpeg included) can't open them. If a clip won't play or import, running it through `convert_flashback.bat` is the way to fix it.
+> **`.flb` clips can only be turned into videos with Flashback Studio** from [Flashback-Studio](https://github.com/LiamTrader43/Flashback-Studio). They use Flashback's own compressed format, so video players, video editors and other tools (plain ffmpeg included) can't open them. If a clip won't play or import, exporting it from Flashback Studio for Windows is the way to fix it.
 
-To convert clips (Windows):
+Flashback Studio comes for the 3DS and for Windows, from the [latest Flashback-Studio release](https://github.com/LiamTrader43/Flashback-Studio/releases/latest) ([Flashback-Studio](https://github.com/LiamTrader43/Flashback-Studio) is the companion project for Flashback clips). Both play clips with their sound, can show the buttons you pressed over the picture, and trim, rename and compact clips (compacting makes a clip about half its size, so it copies to a PC faster).
 
-1. Install [ffmpeg](https://ffmpeg.org/download.html) and make sure the `ffmpeg` command works in a terminal (its `bin` folder must be on your PATH).
-2. Download `convert_flashback.bat` from the [latest Flashback-Studio release](https://github.com/LiamTrader43/Flashback-Studio/releases/latest) ([Flashback-Studio](https://github.com/LiamTrader43/Flashback-Studio) is the companion project for Flashback clips).
-3. Copy your `.flb` clips from the SD card to your PC.
-4. Drag one or more clips onto `convert_flashback.bat`, or put it in the folder with your clips and double-click it to convert them all.
-
-Each clip becomes an MP4 next to it, at twice the size with sharp pixels. It plays in any video player and imports into video editors like DaVinci Resolve. Clips that already have an MP4 are skipped, and a clip that was copied incompletely is reported instead of converted. Clips saved by older Flashback builds (`.raw` with a `.txt`) convert the same way.
-
-To watch clips on the 3DS itself, use the **Flashback Studio** app (a `.3dsx` for the Homebrew Launcher, or a `.cia` to install) from the [latest Flashback-Studio release](https://github.com/LiamTrader43/Flashback-Studio/releases/latest). It plays them on the top screen with their sound, can show the buttons you pressed over the picture, and can compact a clip to about half its size so it copies to a PC faster.
+* **On the 3DS:** a `.3dsx` for the Homebrew Launcher, or a `.cia` to install. It plays clips on the top screen.
+* **On Windows 10 or 11:** extract `FlashbackStudio-Windows.zip` anywhere, copy your clips from the SD card to your PC (or put the SD card in it), and open `FlashbackStudio.exe`. It also **exports clips as MP4 videos** (it comes with ffmpeg, which does the encoding): at twice the size with sharp pixels, with the game's sound, and the input display over them if you like. They play in any video player and import into video editors like DaVinci Resolve. Clips saved by older Flashback builds (`.raw` with a `.txt`) export too.
 
 ### SD card usage
 
@@ -100,7 +94,7 @@ A saved clip is the buffer file itself, so it's the same size (smaller if you sa
 * **Recording is always off after a reboot**: turn it on from the Flashback screen each time. Your other settings (resolution, frame rate, length, audio and hotkey) are remembered in `/luma/flashback/settings.bin` when you leave the Flashback screen. Delete that file to go back to the defaults: full resolution, 30 fps, 30 seconds, audio on, hotkey <kbd>L+R+Down</kbd>.
 * **Only the top screen** is recorded, and only the left eye when 3D is on.
 * **Audio is the game's, at full volume**: it's recorded before the volume slider, so clips have the same level however loud the 3DS is set. Sounds played through the 3DS's other sound hardware (CSND, used by a few games, some system sounds and older homebrew) aren't recorded.
-* **Converting clips needs Windows**: `convert_flashback.bat` uses PowerShell, which comes with Windows. There's no converter for macOS or Linux yet.
+* **Turning clips into videos needs Windows**: Flashback Studio exports them on Windows only. There's no version for macOS or Linux yet.
 * **SD card only**: Flashback is disabled when Luma3DS boots from the internal memory (NAND).
 * **Old 3DS/2DS are slower**: they have a much slower CPU, so higher settings can make games run slower. They still default to full resolution at 30 fps: in testing, an Old 3DS recorded Mario Kart 7 that way with only a few dropped frames per race. If a game slows down or drops many frames, lower the resolution or frame rate.
 * **Some SD cards slow right down for seconds at a time**: frames that come meanwhile wait in memory to be written. A New 3DS/2DS has memory to spare, so Flashback uses up to about 25 MB of it for that while recording (only while plenty is left for the rest of the system), and waits out over ten seconds of it: in testing, a SanDisk Ultra card that had dropped over 100 frames a minute dropped none. An Old 3DS/2DS has little memory to spare, so there a card like that drops frames even though **write** is under the budget on average. A faster card fixes it (a Samsung EVO Plus dropped none in the same game), or a lower frame rate or resolution helps.
