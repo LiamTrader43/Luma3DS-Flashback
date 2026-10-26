@@ -53,8 +53,9 @@ length and frame rate, and audio on and off. Frames are really compressed, at a
 tiny resolution. The "SD card" lets the other threads' work happen in the middle
 of each write, so touching data that's being written would show up. A fake HID
 takes readings between and during grid slots, sometimes more than the 8 it
-holds, and the recorder sometimes wakes up late. After every drain, it checks
-exactly that:
+holds, and the recorder sometimes wakes up late. As on the 3DS, HID's
+timestamps only change when a reading goes into index 0, once a round of 8.
+After every drain, it checks exactly that:
 - the audio ring holds every audio frame it should;
 - every buffered slot holds the right frame, with the right audio position;
 - a save would write the right clip index, and the right inputs for every frame

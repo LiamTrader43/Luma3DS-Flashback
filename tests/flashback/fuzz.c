@@ -102,24 +102,36 @@ static u32 circleOf(u32 r)   { return r ? (r & 0xFFFF) | (r * 3 & 0xFFFF) << 16 
 static bool touchedOf(u32 t) { return t && t / 4 % 3 == 0; }
 static u32 posOf(u32 t)      { return t ? t % 320 | (t * 7 % 240) << 16 : 0; }
 static void put64(u32 *w, u64 v) { w[0] = (u32)v; w[1] = (u32)(v >> 32); }
+static u64 get64(const u32 *w)   { return w[0] | (u64)w[1] << 32; }
+
+/* A section of HID's memory has taken reading 'index' at g_fakeTicks. As on
+   the 3DS, its tick only changes when index 0 is taken (once a round of 8),
+   and the tick before it moves up to the next field. */
+static void sectionTook(u32 *section, u32 index)
+{
+    if (index == 0)
+    {
+        put64(section + 2, get64(section));
+        put64(section, g_fakeTicks);
+    }
+    section[4] = index;
+}
 
 /* HID takes a reading of the pad (and, every other time or so, the touch screen) */
+#define HID_TICKS (SYSCLOCK_ARM11 / 250)    /* (4 ms apart) */
 static void hidReading(void)
 {
+    g_fakeTicks += HID_TICKS;
     u32 r = ++g_padTotal, i = r % 8;
     g_fakeHid[10 + i * 4] = heldOf(r);
     g_fakeHid[10 + i * 4 + 3] = circleOf(r);
-    put64(g_fakeHid + 2, r - 1);    /* (when the one before was taken, and this one) */
-    put64(g_fakeHid + 0, r);
-    g_fakeHid[4] = i;
+    sectionTook(g_fakeHid, i);
     if (rand() % 2)
     {
         u32 t = ++g_touchTotal, j = t % 8;
         g_fakeHid[50 + j * 2] = posOf(t);
         g_fakeHid[51 + j * 2] = touchedOf(t);
-        put64(g_fakeHid + 44, t - 1);
-        put64(g_fakeHid + 42, t);
-        g_fakeHid[46] = j;
+        sectionTook(g_fakeHid + 42, j);
     }
 }
 

@@ -153,9 +153,12 @@ static void flashbackSaveSettings(void)
 // Hotkey and menu
 // ---------------------------------------------------------------------------
 
-// Buttons allowed in the save hotkey: face buttons, D-Pad, L/R, ZL/ZR,
-// Start/Select (not the touchscreen, Circle Pad or C-Stick).
-#define FLASHBACK_COMBO_KEYS    (KEY_A | KEY_B | KEY_X | KEY_Y | KEY_L | KEY_R | KEY_ZL | KEY_ZR | \
+// Buttons allowed in the save hotkey: face buttons, D-Pad, L/R, Start/Select.
+// Not ZL/ZR: Rosalina's HID doesn't see them (the system reports them through
+// another service), so a hotkey with them could never be pressed; one saved
+// with them falls back to the default. Not the touchscreen, Circle Pad or
+// C-Stick either.
+#define FLASHBACK_COMBO_KEYS    (KEY_A | KEY_B | KEY_X | KEY_Y | KEY_L | KEY_R | \
                                  KEY_START | KEY_SELECT | KEY_DUP | KEY_DDOWN | KEY_DLEFT | KEY_DRIGHT)
 
 // Returns why 'combo' can't be the save hotkey, or NULL if it can.

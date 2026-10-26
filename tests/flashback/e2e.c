@@ -128,10 +128,13 @@ static void hidReading(bool inMenu)
     u32 r = ++g_hidN, i = r % 8;
     g_fakeHid[10 + i * 4] = inMenu ? KEY_SELECT : (r & 1 ? KEY_A : 0);
     g_fakeHid[10 + i * 4 + 3] = r & 0x7FFF;
-    g_fakeHid[2] = g_fakeHid[0];    /* (when the one before was taken, and this one) */
-    g_fakeHid[3] = g_fakeHid[1];
-    g_fakeHid[0] = r;
-    g_fakeHid[1] = 0;
+    if (i == 0)                     /* (as on the 3DS, the tick only changes with index 0, the one before moving up) */
+    {
+        g_fakeHid[2] = g_fakeHid[0];
+        g_fakeHid[3] = g_fakeHid[1];
+        g_fakeHid[0] = r;
+        g_fakeHid[1] = 0;
+    }
     g_fakeHid[4] = i;
 }
 

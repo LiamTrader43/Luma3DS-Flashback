@@ -55,9 +55,9 @@
 #define FLASHBACK_INPUT_POLL_MS         15
 
 // HID's shared memory, in words (as libctru's hidScanInput reads it). Each
-// section starts with when its newest reading was taken and when the one
-// before it was (u64 ticks), then, 4 words in, which of its 8 readings is the
-// newest.
+// section starts with when its first reading (index 0) was last taken and
+// when it was the time before that (u64 ticks: they only change once a round
+// of 8), then, 4 words in, which of its 8 readings is the newest.
 #define FLASHBACK_HID_PAD               0
 #define FLASHBACK_HID_PAD_READINGS      10  // 4 words each: buttons held, pressed, released, Circle Pad (x | y << 16)
 #define FLASHBACK_HID_TOUCH             42
@@ -71,18 +71,21 @@ static u64 g_hidPadTick, g_hidTouchTick;    // the newest readings seen...
 static u32 g_hidPadIndex, g_hidTouchIndex;  // ...and which they are
 
 // How many of a section's readings are new since the last look, and which is
-// the newest. All 8 if it went all the way round, or if it's been so long
-// since that it may have: the index alone can't tell 2 new readings from 10.
+// the newest. Its tick only changes when index 0 is taken: if it hasn't, the
+// new readings are the ones after the last one seen; if it has once (the tick
+// before is the one seen), they went past index 0, and if they're back at or
+// beyond the last one seen, all 8 it holds are new; and if it has more than
+// once, they went all the way round, so all 8 are new too.
 static u32 flashbackHidNewReadings(const vu32 *section, u64 *seenTick, u32 *seenIndex)
 {
     u64 tick = section[0] | (u64)section[1] << 32, before = section[2] | (u64)section[3] << 32;
     u32 index = section[4] % 8, n;
     if (tick == *seenTick)
-        n = 0;
-    else if (index == *seenIndex || (tick > before && tick - *seenTick > (tick - before) * 7))
-        n = 8;
-    else
         n = (index - *seenIndex) % 8;
+    else if (before == *seenTick && index < *seenIndex)
+        n = index + 8 - *seenIndex;
+    else
+        n = 8;
     *seenTick = tick;
     *seenIndex = index;
     return n;
