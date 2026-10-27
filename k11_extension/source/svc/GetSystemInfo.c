@@ -70,25 +70,13 @@ Result GetSystemInfoHook(s64 *out, s32 type, s32 param)
                     *out = cfwInfo.splashDurationMsec;
                     break;
                 case 7:
-                    *out = cfwInfo.volumeSliderOverride;
-                    break;
-                case 8:
-                    *out = (s64)cfwInfo.volumeSliderOverrideStereoBalance;
-                    break;
-                case 9:
-                    *out = cfwInfo.ledMasterBrightnessOverride;
-                    break;
-                case 0xA:
-                    *out = cfwInfo.mcuConfigFlags;
+                    *out = (s64)cfwInfo.volumeSliderOverride;
                     break;
                 case 0x10:
                     *out = (s64)cfwInfo.autobootTwlTitleId;
                     break;
                 case 0x11:
                     *out = cfwInfo.autobootCtrAppmemtype;
-                    break;
-                case 0x12:
-                    *out = cfwInfo.autobootCtrUseNs;
                     break;
                 case 0x80:
                     *out = fcramDescriptor->appRegion.regionSizeInBytes;
@@ -106,10 +94,13 @@ Result GetSystemInfoHook(s64 *out, s32 type, s32 param)
                     *out = (s64)cfwInfo.ntpTzOffetMinutes;
                     break;
                 case 0x104:
-                    *out = cfwInfo.topScreenFilter.gammaEnc[0];
+                    *out = cfwInfo.topScreenFilter.gammaEnc;
                     break;
                 case 0x105:
-                    *out = cfwInfo.topScreenFilter.contrastEnc[0];
+                    *out = cfwInfo.topScreenFilter.contrastEnc;
+                    break;
+                case 0x106:
+                    *out = cfwInfo.topScreenFilter.brightnessEnc;
                     break;
                 case 0x107:
                     *out = (s64)cfwInfo.topScreenFilter.invert;
@@ -118,29 +109,22 @@ Result GetSystemInfoHook(s64 *out, s32 type, s32 param)
                     *out = cfwInfo.bottomScreenFilter.cct;
                     break;
                 case 0x109:
-                    *out = cfwInfo.bottomScreenFilter.gammaEnc[0];
+                    *out = cfwInfo.bottomScreenFilter.gammaEnc;
                     break;
                 case 0x10A:
-                    *out = cfwInfo.bottomScreenFilter.contrastEnc[0];
+                    *out = cfwInfo.bottomScreenFilter.contrastEnc;
+                    break;
+                case 0x10B:
+                    *out = cfwInfo.bottomScreenFilter.brightnessEnc;
                     break;
                 case 0x10C:
                     *out = (s64)cfwInfo.bottomScreenFilter.invert;
                     break;
-                case 0x110:
-                case 0x111:
-                    *out = cfwInfo.topScreenFilter.gammaEnc[1 + param - 0x110];
+                case 0x10D:
+                    *out = (s64)cfwInfo.topScreenFilter.colorCurveCorrection;
                     break;
-                case 0x112:
-                case 0x113:
-                    *out = cfwInfo.topScreenFilter.contrastEnc[1 + param - 0x112];
-                    break;
-                case 0x114:
-                case 0x115:
-                    *out = cfwInfo.bottomScreenFilter.gammaEnc[1 + param - 0x114];
-                    break;
-                case 0x116:
-                case 0x117:
-                    *out = cfwInfo.bottomScreenFilter.contrastEnc[1 + param - 0x116];
+                case 0x10E:
+                    *out = (s64)cfwInfo.bottomScreenFilter.colorCurveCorrection;
                     break;
                 case 0x180:
                     *out = cfwInfo.pluginLoaderFlags;

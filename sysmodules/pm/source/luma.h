@@ -19,6 +19,7 @@ enum multiOptions
     PIN,
     NEWCPU,
     AUTOBOOTMODE,
+    FORCEAUDIOOUTPUT,
 };
 
 enum singleOptions
@@ -42,5 +43,3 @@ bool hasKExt(void);
 u32 getKExtSize(void);
 u32 getStolenSystemMemRegionSize(void);
 bool isTitleLaunchPrevented(u64 titleId);
-
-void injectLumaReservedFirmlaunchParams(void *params);

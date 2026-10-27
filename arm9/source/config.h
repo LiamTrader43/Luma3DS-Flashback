@@ -36,21 +36,12 @@
 
 #define CONFIG_FILE         "config.ini"
 #define CONFIG_VERSIONMAJOR 3
-#define CONFIG_VERSIONMINOR 16
+#define CONFIG_VERSIONMINOR 13
 
 #define BOOTCFG_NAND         BOOTCONFIG(0, 1)
 #define BOOTCFG_EMUINDEX     BOOTCONFIG(1, 3)
 #define BOOTCFG_NOFORCEFLAG  BOOTCONFIG(3, 1)
 #define BOOTCFG_NTRCARDBOOT  BOOTCONFIG(4, 1)
-
-// MCU-stored config flags (CfgDataMcu::flags)
-#define MCUCFG_FLAG_ENHANCE_TOP_SCREEN_COLORS       (1u << 0)
-#define MCUCFG_FLAG_ENHANCE_BOTTOM_SCREEN_COLORS    (1u << 1)
-#define MCUCFG_FLAGS_AUDIO_ROUTING_SHIFT            2 // 2 bits: 0 = auto, 1 = speakers, 2 = headphones
-#define MCUCFG_FLAGS_AUDIO_ROUTING_MASK             (3u << MCUCFG_FLAGS_AUDIO_ROUTING_SHIFT)
-#define MCUCFG_FLAG_TEMPERATURE_IN_FAHRENHEIT       (1u << 4)
-
-#define MCUCFG_UNSET_PERCENTAGE_OVERRIDE            0xFF // disabled and not set
 
 enum multiOptions
 {
@@ -60,6 +51,7 @@ enum multiOptions
     PIN,
     NEWCPU,
     AUTOBOOTMODE,
+    FORCEAUDIOOUTPUT,
 };
 
 enum singleOptions
