@@ -204,7 +204,7 @@ static u8 *saveClip(u32 *size)
     *size = dataEnd + tailSize;
     g_head = 0;
     g_count = 0;
-    memset(g_repeat, 0, sizeof(g_repeat));
+    memset(g_repeat, 0, g_frames * sizeof(*g_repeat));
     flashbackAudioReset();
     flashbackInputReset();
     return clip;
@@ -324,18 +324,19 @@ int main(void)
     srand(7);
 
     /* the audio ring must hold every clip length, plus its 2 s of margin */
-    for (u32 i = 0; i < FLASHBACK_LENGTH_CHOICES; i++)
+    for (u32 secs = FLASHBACK_MIN_SECONDS; secs <= FLASHBACK_MAX_SECONDS; secs++)
     {
-        u32 secs = g_lengthChoices[i], frames = flashbackAudioFramesFor(secs);
+        u32 frames = flashbackAudioFramesFor(secs);
         double need = (secs + FLASHBACK_AUDIO_EXTRA_SECONDS) * 32728.498 / 160;
-        printf("%2u s: audio ring %u frames (%.2f s)\n", secs, frames, frames * 160 / 32728.498);
+        if (secs == FLASHBACK_MIN_SECONDS || secs % 120 == 0)
+            printf("%3u s: audio ring %u frames (%.2f s)\n", secs, frames, frames * 160 / 32728.498);
         if (frames < need || frames > need + FLASHBACK_AUDIO_CHUNK_FRAMES + 1) FAIL("audio ring size for %u s\n", secs);
     }
 
-    flashbackApplyFormat(FLASHBACK_RES_HALF, 2, 0, true);     /* 200x120, 30 fps, 10 s, audio */
+    flashbackApplyFormat(FLASHBACK_RES_HALF, 2, 10, true);    /* 200x120, 30 fps, 10 s, audio */
     printf("ring: audio %u frames (%u bytes), video %u slots of %u; memory %u bytes\n",
            g_audioCapFrames, g_audioBytes, g_frames, g_slotStride, g_memSize);
-    g_mem = calloc(1, g_memSize);
+    flashbackUseMem(calloc(1, g_memSize));
     g_ring.size = RING_VIDEO_BASE + (u64)g_frames * g_slotStride;
     g_ring.data = calloc(1, g_ring.size);
     g_head = 0; g_count = 0; flashbackAudioReset();

@@ -81,8 +81,9 @@ static volatile u64 g_audioCapturedTicks;   // ...after this much time captured 
 static volatile bool g_audioIdle = true;    // audio thread -> capture thread: not capturing
 volatile bool g_audioFlushRequest;          // writer: write unfinished chunks too (for a save)
 
-// Audio position (audio frames since the ring started) of each ring slot's frame.
-u32   g_slotAudioFrame[FLASHBACK_MAX_FRAMES];
+// Audio position (audio frames since the ring started) of each ring slot's
+// frame (in g_mem: see flashbackUseMem).
+u32  *g_slotAudioFrame;
 
 // Turns audio capture on or off. The audio thread keeps the audio in step with
 // the time spent capturing since the ring started, which is the time the video

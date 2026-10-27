@@ -56,11 +56,12 @@ volatile u32 g_count;                   // valid ring slots
 // thread fell behind, or a capture/write failed). Saving repeats the slot's
 // frame that many extra times so clips keep real-time speed. Kept in RAM
 // rather than writing duplicates, since a slow SD write is the usual cause.
-u16   g_repeat[FLASHBACK_MAX_FRAMES];
+// (In g_mem, like g_slotLen and g_slotAudioFrame: see flashbackUseMem.)
+u16  *g_repeat;
 
 // Size of each ring slot's contents: the compressed frame, or g_slotBytes if
 // the frame was stored uncompressed (it wouldn't have gotten smaller).
-u32   g_slotLen[FLASHBACK_MAX_FRAMES];
+u32  *g_slotLen;
 
 // Staged frames are packed one after another, each taking only what it
 // compressed to (rounded up to FLASHBACK_STAGE_ALIGN), and staging is used
@@ -314,7 +315,7 @@ Result flashbackStart(void)
         else
             return res;
     }
-    g_mem = (u8 *)FLASHBACK_MEM_ADDR;
+    flashbackUseMem((u8 *)FLASHBACK_MEM_ADDR);
 
     res = FSUSER_OpenArchive(&archive, ARCHIVE_SDMC, fsMakePath(PATH_EMPTY, ""));
     if (R_SUCCEEDED(res))
@@ -334,7 +335,7 @@ Result flashbackStart(void)
 
     g_head = 0;
     g_count = 0;
-    memset(g_repeat, 0, sizeof(g_repeat));
+    memset(g_repeat, 0, g_frames * sizeof(*g_repeat));
     g_pendingMissed = 0;    // (the capture queue is empty: flashbackStop drained it)
     flashbackAudioReset();
     flashbackInputReset();

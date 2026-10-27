@@ -43,8 +43,9 @@
 #define FLASHBACK_SETTINGS_MAGIC    0x54534246  // "FBST"
 // Version 2 added the clip length, as an index into the 5 to 30 second list of
 // that time; version 3 stores it in seconds, so the list can change; version 4
-// added audio. Older files still load.
-#define FLASHBACK_SETTINGS_VERSION  4
+// added audio; version 5 moved the length to 16 bits, for lengths over 255
+// seconds. Older files still load.
+#define FLASHBACK_SETTINGS_VERSION  5
 
 typedef struct FlashbackSettings {
     u32 magic;
@@ -56,20 +57,13 @@ typedef struct FlashbackSettings {
     u8  format;         // unused (always 0): was the save format, when BMP frames were one
     u32 saveCombo;
     // Version 2 and later:
-    u8  length;         // clip length in seconds (version 2: index into { 5, 10, ..., 30 })
+    u8  length;         // versions 3 and 4: clip length in seconds (version 2: index into
+                        // { 5, 10, ..., 30 }; version 5: unused, always 0)
     // Version 4 and later:
     u8  audio;          // record audio: 1 or 0
-    u8  reserved[2];
+    // Version 5 and later (was unused):
+    u16 seconds;        // clip length in seconds
 } FlashbackSettings;
-
-// The shortest available length that's at least 'seconds' (or the longest).
-static u32 flashbackLengthIdxFor(u32 seconds)
-{
-    for (u32 i = 0; i < FLASHBACK_LENGTH_CHOICES; i++)
-        if (g_lengthChoices[i] >= seconds)
-            return i;
-    return FLASHBACK_LENGTH_CHOICES - 1;
-}
 
 #define FLASHBACK_SETTINGS_V1_SIZE  16  // everything up to and including saveCombo
 
@@ -86,8 +80,8 @@ static FlashbackSettings flashbackCurrentSettings(void)
     s.res = (u8)g_wantRes;
     s.fpsIdx = (u8)g_wantFpsIdx;
     s.saveCombo = g_saveCombo;
-    s.length = (u8)g_lengthChoices[g_wantLenIdx];
     s.audio = g_wantAudio ? 1 : 0;
+    s.seconds = (u16)g_wantSeconds;
     return s;
 }
 
@@ -111,10 +105,18 @@ void flashbackLoadSettings(void)
         return;
 
     // Version 1 files end before the length: it keeps its default.
-    if (s.version == 2 && total >= sizeof(s) && s.length < 6)
-        g_wantLenIdx = flashbackLengthIdxFor((s.length + 1) * 5);   // 5..30 s, rounded up
-    else if (s.version >= 3 && total >= sizeof(s) && s.length != 0)
-        g_wantLenIdx = flashbackLengthIdxFor(s.length);
+    u32 seconds = 0;
+    if (total >= sizeof(s))
+    {
+        if (s.version == 2 && s.length < 6)
+            seconds = (s.length + 1) * 5;       // 5..30 s
+        else if (s.version == 3 || s.version == 4)
+            seconds = s.length;
+        else if (s.version >= 5)
+            seconds = s.seconds;
+    }
+    if (seconds >= FLASHBACK_MIN_SECONDS && seconds <= FLASHBACK_MAX_SECONDS)
+        g_wantSeconds = seconds;
     if (s.res < FLASHBACK_RES_COUNT)
         g_wantRes = s.res;
     if (s.fpsIdx < FLASHBACK_FPS_CHOICES)
@@ -234,6 +236,30 @@ static void FlashbackMenu_ChangeHotkey(void)
     }
 }
 
+// Writes the size of a saved clip 'seconds' long, at the resolution, frame rate
+// and audio chosen, as text: the ring file's size (the audio ring, and the
+// frames' slots: see flashbackSlotStride).
+static void flashbackClipSizeText(char *out, u32 seconds)
+{
+    u32 frameBytes = (g_wantRes == FLASHBACK_RES_FULL ? 400 * 240 : 200 * 120) * 2;
+    u32 audioBytes = flashbackAudioWanted() ? flashbackAudioFramesFor(seconds) * FLASHBACK_AUDIO_FRAME_BYTES : 0;
+    u64 clipBytes = flashbackVideoOffset(audioBytes) +
+                    (u64)seconds * g_fpsChoices[g_wantFpsIdx] * flashbackSlotStride(frameBytes);
+    u32 clipTenthsMb = (u32)((clipBytes + 50000) / 100000);     // in tenths of a MB (1 MB = 1,000,000 bytes)
+
+    if (clipTenthsMb < 100)
+        sprintf(out, "%lu.%lu MB", clipTenthsMb / 10, clipTenthsMb % 10);
+    else if (clipTenthsMb < 10000)
+        sprintf(out, "%lu MB", (clipTenthsMb + 5) / 10);
+    else
+    {
+        u32 clipTenthsGb = (clipTenthsMb + 500) / 1000;
+        sprintf(out, "%lu.%lu GB", clipTenthsGb / 10, clipTenthsGb % 10);
+    }
+}
+
+static void FlashbackMenu_ChangeLength(void);
+
 // The Flashback screen is redrawn a few times a second, in place: Rosalina
 // draws straight onto the screen, so clearing it first would show as a
 // flicker. Instead each line is drawn the whole width of the screen (its text,
@@ -300,7 +326,7 @@ static u32 flashbackDrawLines(u32 posY, u32 color, const char *fmt, ...)
 void FlashbackMenu_Show(void)
 {
     bool sdMode = flashbackIsSdMode();
-    char comboStr[128];
+    char comboStr[128], clipSize[16];
     FlashbackSettings before = flashbackCurrentSettings();
 
     do
@@ -308,10 +334,10 @@ void FlashbackMenu_Show(void)
         // What the settings will be once applied (they apply within one frame).
         u32 res = g_wantRes;
         u32 fps = g_fpsChoices[g_wantFpsIdx];
-        u32 seconds = g_lengthChoices[g_wantLenIdx];
+        u32 seconds = g_wantSeconds;
         u32 frames = seconds * fps;
         bool audio = flashbackAudioWanted();
-        bool applied = res == g_res && g_wantFpsIdx == g_fpsIdx && g_wantLenIdx == g_lenIdx && audio == g_audio;
+        bool applied = res == g_res && g_wantFpsIdx == g_fpsIdx && seconds == g_seconds && audio == g_audio;
 
         Draw_Lock();
         g_screenBlankFrom = 0;
@@ -326,19 +352,10 @@ void FlashbackMenu_Show(void)
         posY = flashbackDrawLines(posY, COLOR_WHITE, "Recording:  %s\n", g_enabled ? "on" : "off");
         posY = flashbackDrawLines(posY, COLOR_WHITE, "Resolution: %s\n",
                                   res == FLASHBACK_RES_FULL ? "full (400x240)" : "half (200x120)");
-        // Size of a saved clip of the full length: the ring file (the audio
-        // ring, and the frames' slots: see flashbackSlotStride).
-        u32 frameBytes = (res == FLASHBACK_RES_FULL ? 400 * 240 : 200 * 120) * 2;
-        u32 audioBytes = audio ? flashbackAudioFramesFor(seconds) * FLASHBACK_AUDIO_FRAME_BYTES : 0;
-        u64 clipBytes = flashbackVideoOffset(audioBytes) + (u64)frames * flashbackSlotStride(frameBytes);
-        u32 clipTenthsMb = (u32)((clipBytes + 50000) / 100000);     // in tenths of a MB (1 MB = 1,000,000 bytes)
-
-        if (clipTenthsMb < 100)
-            posY = flashbackDrawLines(posY, COLOR_WHITE, "Frame rate: %lu fps   Length: %lu s (%lu.%lu MB)\n",
-                                      fps, seconds, clipTenthsMb / 10, clipTenthsMb % 10);
-        else
-            posY = flashbackDrawLines(posY, COLOR_WHITE, "Frame rate: %lu fps   Length: %lu s (%lu MB)\n",
-                                      fps, seconds, (clipTenthsMb + 5) / 10);
+        // (With the size of a saved clip of the full length.)
+        flashbackClipSizeText(clipSize, seconds);
+        posY = flashbackDrawLines(posY, COLOR_WHITE, "Frame rate: %lu fps   Length: %lu s (%s)\n",
+                                  fps, seconds, clipSize);
         posY = flashbackDrawLines(posY, COLOR_WHITE, "Audio:      %s\n\n",
                                   !g_audioRunning ? "failed" : g_wantAudio ? "on" : "off");
 
@@ -409,10 +426,8 @@ void FlashbackMenu_Show(void)
             g_wantFpsIdx = (g_wantFpsIdx + 1) % FLASHBACK_FPS_CHOICES;
         else if ((pressed & KEY_DLEFT) && !busy)
             g_wantFpsIdx = (g_wantFpsIdx + FLASHBACK_FPS_CHOICES - 1) % FLASHBACK_FPS_CHOICES;
-        else if ((pressed & KEY_R) && !busy && g_wantLenIdx + 1 < FLASHBACK_LENGTH_CHOICES)
-            g_wantLenIdx = g_wantLenIdx + 1;    // longer (stops at the longest)
-        else if ((pressed & KEY_L) && !busy && g_wantLenIdx > 0)
-            g_wantLenIdx = g_wantLenIdx - 1;    // shorter (stops at the shortest)
+        else if ((pressed & (KEY_L | KEY_R)) && !busy)
+            FlashbackMenu_ChangeLength();
         else if ((pressed & KEY_START) && !busy && g_audioRunning)
             g_wantAudio = !g_wantAudio;
         else if (pressed & KEY_SELECT)
@@ -426,4 +441,80 @@ void FlashbackMenu_Show(void)
     FlashbackSettings after = flashbackCurrentSettings();
     if (memcmp(&before, &after, sizeof(before)) != 0)
         flashbackSaveSettings();
+}
+
+// The clip length screen: the length in seconds, set a digit at a time.
+// (Drawn in place, like the Flashback screen.)
+static void FlashbackMenu_ChangeLength(void)
+{
+    u32 digits[3] = { g_wantSeconds / 100, g_wantSeconds / 10 % 10, g_wantSeconds % 10 };
+    u32 at = 0;     // the digit being set: hundreds, tens or ones
+    char minutes[24], clipSize[16];
+
+    do
+    {
+        u32 seconds = digits[0] * 100 + digits[1] * 10 + digits[2];
+        bool valid = seconds >= FLASHBACK_MIN_SECONDS && seconds <= FLASHBACK_MAX_SECONDS;
+
+        if (seconds < 60)
+            minutes[0] = '\0';
+        else if (seconds % 60 == 0)
+            sprintf(minutes, " (%lu min)", seconds / 60);
+        else
+            sprintf(minutes, " (%lu min %lu s)", seconds / 60, seconds % 60);
+
+        Draw_Lock();
+        g_screenBlankFrom = 0;
+        flashbackDrawLines(10, COLOR_TITLE, "Flashback recorder: clip length");
+
+        u32 posY = flashbackDrawLines(30, COLOR_WHITE, "How many seconds Flashback keeps, and saves\nas a clip: %lu to %lu (%lu minutes).\n\n",
+                                      (u32)FLASHBACK_MIN_SECONDS, (u32)FLASHBACK_MAX_SECONDS,
+                                      (u32)FLASHBACK_MAX_SECONDS / 60);
+
+        // The digits apart, the one being set in green with a mark under it.
+        u32 lengthY = posY;
+        posY = flashbackDrawLines(posY, COLOR_WHITE, "Length:  %lu %lu %lu  seconds%s\n",
+                                  digits[0], digits[1], digits[2], minutes);
+        Draw_DrawCharacter(10 + (9 + 2 * at) * SPACING_X, lengthY, COLOR_GREEN, '0' + digits[at]);
+        posY = flashbackDrawLines(posY, COLOR_GREEN, "%*s^\n\n", (int)(9 + 2 * at), "");
+
+        if (seconds < FLASHBACK_MIN_SECONDS)
+            posY = flashbackDrawLines(posY, COLOR_RED, "The shortest is %lu second.\n", (u32)FLASHBACK_MIN_SECONDS);
+        else if (seconds > FLASHBACK_MAX_SECONDS)
+            posY = flashbackDrawLines(posY, COLOR_RED, "The longest is %lu seconds (%lu minutes).\n",
+                                      (u32)FLASHBACK_MAX_SECONDS, (u32)FLASHBACK_MAX_SECONDS / 60);
+        else
+        {
+            flashbackClipSizeText(clipSize, seconds);
+            posY = flashbackDrawLines(posY, COLOR_WHITE, "Size of the buffer and a saved clip: %s\n", clipSize);
+        }
+
+        posY += 10;
+        posY = flashbackDrawLines(posY, COLOR_WHITE, "Up/Down: change the digit   Left/Right: move\n");
+        flashbackDrawLines(posY, COLOR_WHITE, "A: use this length   B: back, unchanged");
+        flashbackBlankRows(g_screenBlankFrom, SCREEN_BOT_HEIGHT);
+
+        Draw_FlushFramebuffer();
+        Draw_Unlock();
+
+        u32 pressed = waitInput();
+        u32 values = at == 0 ? FLASHBACK_MAX_SECONDS / 100 + 1 : 10;   // (the hundreds go up to the longest's)
+
+        if (pressed & KEY_DUP)
+            digits[at] = (digits[at] + 1) % values;
+        else if (pressed & KEY_DDOWN)
+            digits[at] = (digits[at] + values - 1) % values;
+        else if (pressed & KEY_DRIGHT)
+            at = (at + 1) % 3;
+        else if (pressed & KEY_DLEFT)
+            at = (at + 2) % 3;
+        else if ((pressed & KEY_A) && valid)
+        {
+            g_wantSeconds = seconds;
+            return;
+        }
+        else if (pressed & KEY_B)
+            return;
+    }
+    while (!menuShouldExit);
 }

@@ -59,11 +59,13 @@ typedef enum FlashbackResolution {
 static const u32 g_fpsChoices[] = { 10, 20, 30 };
 #define FLASHBACK_FPS_CHOICES   (sizeof(g_fpsChoices) / sizeof(g_fpsChoices[0]))
 
-// Clip length in seconds (how much the ring buffer holds).
-static const u32 g_lengthChoices[] = { 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120 };
-#define FLASHBACK_LENGTH_CHOICES (sizeof(g_lengthChoices) / sizeof(g_lengthChoices[0]))
-#define FLASHBACK_DEFAULT_LENGTH_IDX 2      // 30 seconds
-#define FLASHBACK_MAX_FRAMES    (120 * 30)  // longest length at the highest frame rate
+// Clip length in seconds (how much the ring buffer holds), set digit by digit
+// in the menu. At the longest, full resolution and 30 fps, the ring file (and
+// a saved clip) is about 3.6 GB: under the 4 GB a file can be on the SD card
+// (FAT32), with clip offsets still fitting in 32 bits.
+#define FLASHBACK_MIN_SECONDS       1
+#define FLASHBACK_MAX_SECONDS       600     // 10 minutes
+#define FLASHBACK_DEFAULT_SECONDS   30
 
 // The recorder's threads (flashback.c).
 extern bool g_threadRunning;
@@ -75,7 +77,7 @@ extern bool g_writerRunning;
 extern volatile bool g_enabled;
 extern volatile u32  g_wantRes;
 extern volatile u32  g_wantFpsIdx;
-extern volatile u32  g_wantLenIdx;
+extern volatile u32  g_wantSeconds;
 extern volatile u32  g_saveCombo;
 extern volatile bool g_saveRequested;
 extern volatile bool g_saveFromHotkey;
@@ -86,19 +88,20 @@ extern char g_lastClip[96];
 // The recording format (flashback.c).
 extern volatile u32 g_res;
 extern volatile u32 g_fpsIdx;
-extern volatile u32 g_lenIdx;
+extern volatile u32 g_seconds;
 extern u32 g_w, g_h, g_fps, g_frames;
 extern u32 g_slotBytes, g_frameOffset, g_memSize;
 extern u32 g_slotStride;
 
-// The ring (flashback_record.c).
+// The ring (flashback_record.c). What's known about each of its slots is in
+// g_mem, g_frames of each (flashbackLayout, flashbackUseMem).
 extern bool  g_active;
 extern u8   *g_mem;
 extern IFile g_ring;
 extern u32   g_head;
 extern volatile u32 g_count;
-extern u16   g_repeat[FLASHBACK_MAX_FRAMES];
-extern u32   g_slotLen[FLASHBACK_MAX_FRAMES];
+extern u16  *g_repeat;
+extern u32  *g_slotLen;
 
 // Audio (flashback_audio.c).
 #define FLASHBACK_AUDIO_FRAME_SAMPLES   160
@@ -131,7 +134,7 @@ extern volatile u32 g_audioProduced, g_audioConsumed, g_audioFlushed;
 extern volatile u32 g_audioMissed;
 extern volatile u32 g_audioFull;
 extern volatile bool g_audioFlushRequest;
-extern u32   g_slotAudioFrame[FLASHBACK_MAX_FRAMES];
+extern u32  *g_slotAudioFrame;
 
 // Staging and the capture queue (flashback_record.c).
 //
@@ -206,6 +209,7 @@ extern u32 g_winFrames, g_winRawFrames;
 // flashback.c
 u32 flashbackAudioFramesFor(u32 seconds);
 void flashbackLayout(void);
+void flashbackUseMem(u8 *mem);
 u32 flashbackSlotStride(u32 slotBytes);
 u32 flashbackVideoOffset(u32 audioBytes);
 void flashbackResetStats(void);
@@ -264,6 +268,7 @@ typedef struct FlashbackClipPlan {
     u32 frames;         // frames in the clip, duplicates included
 } FlashbackClipPlan;
 FlashbackClipPlan flashbackPlanClip(void);
+u32 flashbackClipTailMax(u32 frames);
 s32 flashbackSave(void);
 
 // flashback_menu.c

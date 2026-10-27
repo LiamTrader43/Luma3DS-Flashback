@@ -15,7 +15,7 @@ FILES = [os.path.join(SOURCE, '..', 'include', 'flashback_internal.h')] + \
                                                  'flashback_input.c', 'flashback_record.c', 'flashback_clip.c']]
 FUNCTIONS = {
     # flashback.c
-    'flashbackAudioFramesFor', 'flashbackLayout', 'flashbackSlotStride', 'flashbackVideoOffset',
+    'flashbackAudioFramesFor', 'flashbackLayout', 'flashbackUseMem', 'flashbackSlotStride', 'flashbackVideoOffset',
     'flashbackApplyFormat',
     # flashback_compress.c (frames in the tests are compressed for real)
     'flashbackPackHash', 'flashbackUprightBand', 'flashbackPackPixels', 'flashbackCompress',
@@ -33,7 +33,7 @@ FUNCTIONS = {
     'flashbackFillMissed',
     # flashback_clip.c
     'flashbackPlanClip', 'flashbackPlanSlot', 'flashbackAudioOldest', 'flashbackAudioBase',
-    'flashbackAudioSampleOf', 'flashbackBuildClipInputs', 'flashbackBuildClipIndex',
+    'flashbackAudioSampleOf', 'flashbackBuildClipInputs', 'flashbackBuildClipIndex', 'flashbackClipTailMax',
 }
 
 

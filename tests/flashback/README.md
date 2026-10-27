@@ -10,7 +10,7 @@ python run_tests.py --cc "C:/Program Files/JetBrains/CLion 2025.2.4/bin/mingw/bi
 ```
 
 It builds and runs every test, then lists which passed. If any failed, it exits
-with 1. A full run takes about 3 minutes, most of it the end-to-end test.
+with 1. A full run takes about 4 minutes, most of it the fuzz and end-to-end tests.
 
 - `--cc`: the C compiler. The default is `gcc`. On Windows, use a MinGW gcc, such
   as CLion's or MSYS2's. The runner puts the compiler's folder on the PATH.
@@ -48,8 +48,8 @@ do, without that repository. Keep the copy in step with the original.
 **Fuzz test** (`fuzz.c`). A deterministic random test of everything recording
 does: the capture queue, packed staging at every size it can have, audio
 staging, the writer, and the inputs' records. It also covers saves (including
-ones that fail and carry on), write failures, staging running full, every clip
-length and frame rate, and audio on and off. Frames are really compressed, at a
+ones that fail and carry on), write failures, staging running full, clip
+lengths from 1 second to 10 minutes, every frame rate, and audio on and off. Frames are really compressed, at a
 tiny resolution. The "SD card" lets the other threads' work happen in the middle
 of each write, so touching data that's being written would show up. A fake HID
 takes readings between and during grid slots, sometimes more than the 8 it
@@ -59,7 +59,9 @@ After every drain, it checks exactly that:
 - the audio ring holds every audio frame it should;
 - every buffered slot holds the right frame, with the right audio position;
 - a save would write the right clip index, and the right inputs for every frame
-  (against a model of what each record should hold).
+  (against a model of what each record should hold). They're built where a save
+  builds them, at the start of the recorder's memory, and must fit in the room
+  kept for them there.
 
 **End-to-end test** (`e2e.c`). The recorder's threads run for real, in real
 time:

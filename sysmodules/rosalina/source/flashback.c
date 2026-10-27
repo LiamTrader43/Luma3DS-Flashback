@@ -62,7 +62,7 @@ volatile bool g_enabled;                // user toggle
 // only a few frames a race.)
 volatile u32  g_wantRes = FLASHBACK_RES_FULL;          // FlashbackResolution chosen in the menu
 volatile u32  g_wantFpsIdx = 2;                        // index into g_fpsChoices chosen in the menu (30 fps)
-volatile u32  g_wantLenIdx = FLASHBACK_DEFAULT_LENGTH_IDX; // index into g_lengthChoices chosen in the menu
+volatile u32  g_wantSeconds = FLASHBACK_DEFAULT_SECONDS; // clip length chosen in the menu
 volatile u32  g_saveCombo = FLASHBACK_DEFAULT_SAVE_COMBO;
 volatile bool g_saveRequested;
 volatile bool g_saveFromHotkey;         // show bottom-screen feedback
@@ -74,10 +74,11 @@ char g_lastClip[96];
 // (when nothing is recording); read by the menu for display.
 volatile u32 g_res = FLASHBACK_RES_FULL;
 volatile u32 g_fpsIdx = 2;
-volatile u32 g_lenIdx = FLASHBACK_DEFAULT_LENGTH_IDX;
-u32 g_w, g_h, g_fps, g_frames;          // derived from g_res / g_fpsIdx / g_lenIdx
+volatile u32 g_seconds = FLASHBACK_DEFAULT_SECONDS;
+u32 g_w, g_h, g_fps, g_frames;          // derived from g_res / g_fpsIdx / g_seconds
 u32 g_slotBytes, g_frameOffset, g_memSize;
 u32 g_slotStride;                       // ring slot size: g_slotBytes rounded up (flashbackSlotStride)
+static u32 g_slotInfoOffset;            // where what's known about the ring's slots is, in g_mem
 
 // Performance stats shown in the menu, updated about once a second while recording.
 volatile u32 g_statFpsX10;              // frames actually recorded per second, x10
@@ -106,22 +107,41 @@ u32 flashbackAudioFramesFor(u32 seconds)
 
 // Where things are in the recorder's memory, for g_stageSlots frames' worth of
 // staging, g_capBufs capture buffers and g_audioStageFrames of audio staging:
-// the staging first (the clip's inputs and index while saving, when it's
-// empty: see flashbackSaveClipFile), then the capture buffers, which hold
-// frames as captured (before compression), each with a column's worth after it
-// that compressing reads past the frame (flashbackCompress), then the audio
-// staging, then the inputs' ring (flashback_input.c).
+// the staging first, then the capture buffers, which hold frames as captured
+// (before compression), each with a column's worth after it that compressing
+// reads past the frame (flashbackCompress), then the audio staging, then the
+// inputs' ring (flashback_input.c), then what's known about each ring slot
+// (flashbackUseMem). While saving, the clip's inputs and index are built at
+// the start, over the staging and the capture buffers (both empty then: see
+// flashbackSaveClipFile). A long clip's can need more room than those have:
+// then the audio staging starts after that room.
 void flashbackLayout(void)
 {
     g_stageBytes = g_stageSlots * g_slotStride;
     g_frameOffset = (g_stageBytes + 0xFFF) & ~0xFFF;
     g_capStride = (g_slotBytes + g_h * 2 + 0xFFF) & ~0xFFF;
     g_memSize = g_frameOffset + g_capBufs * g_capStride;
+    u32 tailBytes = (flashbackClipTailMax(g_frames) + 0xFFF) & ~0xFFF;
+    if (g_memSize < tailBytes)
+        g_memSize = tailBytes;
     g_audioStageOffset = g_memSize;
     if (g_audio)
         g_memSize += (g_audioStageFrames * FLASHBACK_AUDIO_FRAME_BYTES + 0xFFF) & ~0xFFF;
     g_inputOffset = g_memSize;
     g_memSize += (g_frames * sizeof(FlashbackInput) + 0xFFF) & ~0xFFF;
+    g_slotInfoOffset = g_memSize;
+    g_memSize += (g_frames * (2 * sizeof(u32) + sizeof(u16)) + 0xFFF) & ~0xFFF;
+}
+
+// Starts using 'mem' (g_memSize bytes, laid out by flashbackLayout) as the
+// recorder's memory: g_slotLen, g_slotAudioFrame and g_repeat, g_frames of
+// each, are at its end.
+void flashbackUseMem(u8 *mem)
+{
+    g_mem = mem;
+    g_slotLen = (u32 *)(mem + g_slotInfoOffset);
+    g_slotAudioFrame = g_slotLen + g_frames;
+    g_repeat = (u16 *)(g_slotAudioFrame + g_frames);
 }
 
 // Every frame is written starting on a boundary of the card's internal blocks:
@@ -143,16 +163,16 @@ u32 flashbackVideoOffset(u32 audioBytes)
     return (audioBytes + 0xFFFF) & ~0xFFFF;
 }
 
-static void flashbackApplyFormat(u32 res, u32 fpsIdx, u32 lenIdx, bool audio)
+static void flashbackApplyFormat(u32 res, u32 fpsIdx, u32 seconds, bool audio)
 {
     g_res = res;
     g_fpsIdx = fpsIdx;
-    g_lenIdx = lenIdx;
+    g_seconds = seconds;
 
     g_w = res == FLASHBACK_RES_FULL ? 400 : 200;
     g_h = res == FLASHBACK_RES_FULL ? 240 : 120;
     g_fps = g_fpsChoices[fpsIdx];
-    g_frames = g_lengthChoices[lenIdx] * g_fps;
+    g_frames = seconds * g_fps;
 
     g_slotBytes = g_w * g_h * 2;
     g_slotStride = flashbackSlotStride(g_slotBytes);
@@ -160,7 +180,7 @@ static void flashbackApplyFormat(u32 res, u32 fpsIdx, u32 lenIdx, bool audio)
     // Audio: a ring at the start of the ring file (a whole number of chunks of
     // whole SD sectors), the video slots after it, and staging memory.
     g_audio = audio;
-    g_audioCapFrames = audio ? flashbackAudioFramesFor(g_lengthChoices[lenIdx]) : 0;
+    g_audioCapFrames = audio ? flashbackAudioFramesFor(seconds) : 0;
     g_audioBytes = g_audioCapFrames * FLASHBACK_AUDIO_FRAME_BYTES;
     g_videoOffset = flashbackVideoOffset(g_audioBytes);
 
@@ -315,7 +335,7 @@ static void flashbackThreadMain(void)
     bool sdMode = flashbackIsSdMode();
     if (sdMode)
         flashbackLoadSettings();
-    flashbackApplyFormat(g_wantRes, g_wantFpsIdx, g_wantLenIdx, flashbackAudioWanted());
+    flashbackApplyFormat(g_wantRes, g_wantFpsIdx, g_wantSeconds, flashbackAudioWanted());
 
     u64 period = SYSCLOCK_ARM11 / g_fps;
     u64 nextTick = svcGetSystemTick();
@@ -357,11 +377,11 @@ static void flashbackThreadMain(void)
 
         // Settings changed in the menu: the ring layout depends on them, so
         // drop the buffer and restart with the new format.
-        if (g_wantRes != g_res || g_wantFpsIdx != g_fpsIdx || g_wantLenIdx != g_lenIdx ||
+        if (g_wantRes != g_res || g_wantFpsIdx != g_fpsIdx || g_wantSeconds != g_seconds ||
             flashbackAudioWanted() != g_audio)
         {
             flashbackStop();
-            flashbackApplyFormat(g_wantRes, g_wantFpsIdx, g_wantLenIdx, flashbackAudioWanted());
+            flashbackApplyFormat(g_wantRes, g_wantFpsIdx, g_wantSeconds, flashbackAudioWanted());
             period = SYSCLOCK_ARM11 / g_fps;
             nextTick = svcGetSystemTick();
             wasRecording = false;

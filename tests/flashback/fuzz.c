@@ -25,6 +25,7 @@
 #ifndef RING_VIDEO_BASE
 #define RING_VIDEO_BASE g_videoOffset  /* where the ring's video slots start */
 #endif
+#define FLASHBACK_MAX_FRAMES (FLASHBACK_MAX_SECONDS * 30)  /* the longest clip at the highest frame rate */
 
 /* Flashback Studio's decoder (a copy of 3ds-app/source/flb.c's: decode.c), linked in */
 bool flbDecompress(const uint8_t *src, uint32_t len, uint16_t *dst, uint32_t pixels);
@@ -316,7 +317,7 @@ static void check(void)
     if (g_count == 0) return;
     FlashbackClipPlan plan = flashbackPlanClip();
     u32 dataEnd = RING_VIDEO_BASE + (g_count < g_frames ? g_count : g_frames) * g_slotStride;
-    static u8 ibuf[16 + FLASHBACK_MAX_FRAMES * 16];
+    u8 *ibuf = g_mem;   /* (where a save builds them, over staging and the capture buffers) */
     u32 isize = flashbackBuildClipInputs(&plan, ibuf);
     const u32 *ih = (const u32 *)ibuf;
     if (isize != 16 + plan.frames * 16 || ih[0] != 0x49424C46 || ih[1] != 1 || ih[2] != plan.frames || ih[3] != 16)
@@ -338,8 +339,10 @@ static void check(void)
             g_inputsChecked++;
         }
 
-    static u8 buf[FLASHBACK_MAX_FRAMES * 16 + 128];
+    u8 *buf = g_mem + isize;
     u32 size = flashbackBuildClipIndex(&plan, dataEnd + isize, dataEnd, buf);
+    if (isize + size > flashbackClipTailMax(g_frames) || isize + size > g_audioStageOffset)
+        FAIL("the clip's inputs and index (%u bytes) are past the room for them\n", isize + size);
     u32 es = g_audio ? 16 : 12;
     if (size != plan.slots * es + (g_audio ? 32 : 0) + 48) FAIL("index size\n");
     const u32 *t = (const u32 *)(buf + size - 48);
@@ -378,7 +381,7 @@ static void startRing(void)
     g_epoch++;
     memset(g_ring.data, 0xEE, g_ring.size);
     g_head = 0; g_count = 0;
-    memset(g_repeat, 0, sizeof(g_repeat));
+    memset(g_repeat, 0, g_frames * sizeof(*g_repeat));
     flashbackAudioReset();
     flashbackInputReset();
     g_mInputCount = 0;
@@ -402,7 +405,13 @@ int main(void)
     {
         runs++;
         bool audio = rand() % 5 != 0;
-        flashbackApplyFormat(rand() % 2, rand() % 3, rand() % FLASHBACK_LENGTH_CHOICES, audio);   /* (every length) */
+        /* clip lengths: mostly up to 2 minutes (a long one takes a while to
+           check), every 20th run any length, and the shortest and the longest
+           every 50th */
+        u32 seconds = run % 50 == 24 ? FLASHBACK_MIN_SECONDS : run % 50 == 49 ? FLASHBACK_MAX_SECONDS
+                    : run % 20 == 19 ? FLASHBACK_MIN_SECONDS + rand() % (FLASHBACK_MAX_SECONDS - FLASHBACK_MIN_SECONDS + 1)
+                    : FLASHBACK_MIN_SECONDS + rand() % 120;
+        flashbackApplyFormat(rand() % 2, rand() % 3, seconds, audio);
         /* tiny frames, so the video ring stays small (the audio ring is real size) */
         g_w = TINY_W; g_h = TINY_H;
         g_slotBytes = TINY_W * TINY_H * 2; g_slotStride = 2048;
@@ -411,7 +420,7 @@ int main(void)
         g_audioStageFrames = rand() % 2 ? FLASHBACK_AUDIO_STAGE_FRAMES : FLASHBACK_AUDIO_STAGE_FRAMES_MIN;   /* (both sizes) */
         flashbackLayout();
 
-        g_mem = calloc(1, g_memSize);
+        flashbackUseMem(calloc(1, g_memSize));
         g_active = true;
         g_ring.size = RING_VIDEO_BASE + (u64)g_frames * g_slotStride;
         g_ring.data = malloc(g_ring.size);

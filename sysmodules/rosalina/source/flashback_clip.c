@@ -236,13 +236,14 @@ static u32 flashbackBuildClipIndex(const FlashbackClipPlan *plan, u32 indexOffse
     return (u32)((u8 *)(t + 1) - buf);
 }
 
-// The clip's inputs and index are built in staging, at least
-// FLASHBACK_STAGE_SLOTS_MIN frames' worth (and empty while saving: see
-// flashbackSave).
-_Static_assert(sizeof(FlashbackClipInputs) + FLASHBACK_MAX_FRAMES * (sizeof(FlashbackInput) + 16) +
-                   sizeof(FlashbackClipAudioInfo) + sizeof(FlashbackClipTrailer) <=
-                   FLASHBACK_STAGE_SLOTS_MIN * 200 * 120 * 2,
-               "a clip's inputs and index fit in staging at half resolution");
+// The most room a clip of 'frames' frames' inputs and index can take. They're
+// built at the start of the recorder's memory, which flashbackLayout keeps
+// that much of free while saving.
+u32 flashbackClipTailMax(u32 frames)
+{
+    return sizeof(FlashbackClipInputs) + frames * (sizeof(FlashbackInput) + 16) +   // (16: an index entry, with audio)
+           sizeof(FlashbackClipAudioInfo) + sizeof(FlashbackClipTrailer);
+}
 
 // Saves the clip by turning the ring file into it, then starts a fresh ring.
 // Needs the writer to be idle (flashbackDrainWrites).
@@ -256,7 +257,7 @@ static s32 flashbackSaveClipFile(FS_Archive archive, const char *clip, const Fla
     // The ring always starts at slot 0, so until it has wrapped once the clip
     // only uses its first g_count slots: the rest can be trimmed off.
     u32 dataEnd = g_videoOffset + (g_count < g_frames ? g_count : g_frames) * g_slotStride;
-    u8 *tail = g_mem;                   // staging: empty while saving (everything's written)
+    u8 *tail = g_mem;                   // staging and the capture buffers: empty while saving (see flashbackLayout)
     u32 inputSize = flashbackBuildClipInputs(plan, tail);
     u32 tailSize = inputSize + flashbackBuildClipIndex(plan, dataEnd + inputSize, dataEnd, tail + inputSize);
 
@@ -289,7 +290,7 @@ static s32 flashbackSaveClipFile(FS_Archive archive, const char *clip, const Fla
     // The old buffer is now the clip: continue with an empty one.
     g_head = 0;
     g_count = 0;
-    memset(g_repeat, 0, sizeof(g_repeat));
+    memset(g_repeat, 0, g_frames * sizeof(*g_repeat));
     flashbackAudioReset();
     flashbackInputReset();
     if (R_FAILED(flashbackOpenRing(archive)))
