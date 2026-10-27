@@ -248,6 +248,14 @@ static inline bool flashbackAudioWanted(void)
     return g_wantAudio && g_audioRunning;
 }
 
+// FS priority for the recorder's files: the ring, and a clip as it's saved.
+// Rosalina's FS session runs at real-time priority, ahead of the game's own SD
+// reads (streamed music...); the ring's constant writes must not get ahead of
+// them, and the lowest priority costs them nothing (see
+// docs/flashback-design.md, "SD card writes"). Nor must the big jobs: sizing a
+// new ring (up to 3.6 GB to claim on the card), or writing a clip's index.
+#define FLASHBACK_FS_PRIORITY   8
+
 // flashback_record.c
 Result flashbackCreateDirectory(FS_Archive archive, const char *path);
 void flashbackWriterThreadMain(void);

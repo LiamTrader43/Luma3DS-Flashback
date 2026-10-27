@@ -36,6 +36,8 @@ To check that you're running Flashback, open the Rosalina menu (<kbd>L+Down+Sele
 
 You can also save from the Flashback screen with <kbd>X</kbd>. Recording pauses while any Rosalina menu is open (the game is paused too), so saving from the menu doesn't add frozen frames to the end of your clip.
 
+**Close the Rosalina menu within about 7 seconds.** Some games, Mario Kart 7 among them, lose their sound for several seconds after the menu has been open for 8 seconds or more, and can freeze for a few seconds too, before both come back on their own. That's a limitation of Luma3DS itself, and happens without Flashback too (see [Limitations](#limitations)). Saving with the hotkey doesn't open the menu at all.
+
 ### Flashback screen controls
 
 | Button | Action |
@@ -92,6 +94,7 @@ A saved clip is the buffer file itself, so it's the same size (smaller if you sa
 ### Limitations
 
 * **Recording is always off after a reboot**: turn it on from the Flashback screen each time. Your other settings (resolution, frame rate, length, audio and hotkey) are remembered in `/luma/flashback/settings.bin` when you leave the Flashback screen. Delete that file to go back to the defaults: full resolution, 30 fps, 30 seconds, audio on, hotkey <kbd>L+R+Down</kbd>.
+* **Long visits to the Rosalina menu can stop a game's sound**: Luma3DS pauses the game while the menu is open, and some games don't come back cleanly from a pause of 8 seconds or more. Their sound stops for several seconds after the menu closes, and they can freeze for a few seconds too. This is Luma3DS's own limitation ([Luma3DS issue #1483](https://github.com/LumaTeam/Luma3DS/issues/1483)), not Flashback's. The way around it is to close the menu within about 7 seconds. Saving with the hotkey avoids the menu.
 * **Only the top screen** is recorded, and only the left eye when 3D is on.
 * **Audio is the game's, at full volume**: it's recorded before the volume slider, so clips have the same level however loud the 3DS is set. Sounds played through the 3DS's other sound hardware (CSND, used by a few games, some system sounds and older homebrew) aren't recorded.
 * **Turning clips into videos needs Windows**: Flashback Studio exports them on Windows only. There's no version for macOS or Linux yet.

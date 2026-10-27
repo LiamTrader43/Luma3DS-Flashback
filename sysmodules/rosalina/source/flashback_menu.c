@@ -258,6 +258,16 @@ static void flashbackClipSizeText(char *out, u32 seconds)
     }
 }
 
+// Writes a time in microseconds as ms: to a tenth below 10 ms, whole from
+// there, so the "Per frame" line fits on one line even when things are slow.
+static void flashbackMsText(char *out, u32 us)
+{
+    if (us < 10000)
+        sprintf(out, "%lu.%lu", us / 1000, (us / 100) % 10);
+    else
+        sprintf(out, "%lu", us / 1000);
+}
+
 static void FlashbackMenu_ChangeLength(void);
 
 // The Flashback screen is redrawn a few times a second, in place: Rosalina
@@ -326,7 +336,7 @@ static u32 flashbackDrawLines(u32 posY, u32 color, const char *fmt, ...)
 void FlashbackMenu_Show(void)
 {
     bool sdMode = flashbackIsSdMode();
-    char comboStr[128], clipSize[16];
+    char comboStr[128], clipSize[16], captureMs[12], compressMs[12], writeMs[12];
     FlashbackSettings before = flashbackCurrentSettings();
 
     do
@@ -377,10 +387,11 @@ void FlashbackMenu_Show(void)
         else
             posY = flashbackDrawLines(posY, COLOR_WHITE, "Rate:      %lu.%lu / %lu fps\n",
                                       g_statFpsX10 / 10, g_statFpsX10 % 10, fps);
-        posY = flashbackDrawLines(posY, COLOR_WHITE, "Per frame: capture %lu.%lu, compress %lu.%lu, write %lu.%lums\n",
-                                  g_statCaptureUs / 1000, (g_statCaptureUs / 100) % 10,
-                                  g_statCompressUs / 1000, (g_statCompressUs / 100) % 10,
-                                  g_statWriteUs / 1000, (g_statWriteUs / 100) % 10);
+        flashbackMsText(captureMs, g_statCaptureUs);
+        flashbackMsText(compressMs, g_statCompressUs);
+        flashbackMsText(writeMs, g_statWriteUs);
+        posY = flashbackDrawLines(posY, COLOR_WHITE, "Per frame: capture %s, compress %s, write %sms\n",
+                                  captureMs, compressMs, writeMs);
         posY = flashbackDrawLines(posY, COLOR_WHITE, "Budget:    %lums, compressed to %lu%%, raw %lu%%\n\n",
                                   1000 / fps, g_statSizePct, g_statRawPct);
 

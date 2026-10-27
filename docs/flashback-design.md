@@ -64,11 +64,16 @@ around 5 MB/s. Full resolution at 30 fps needs 5.8 MB/s uncompressed.
 **One request per frame.** Batching several frames per SD request was tried,
 and didn't help: the time is in moving the bytes, not in each request.
 
-**FS priority** (`FLASHBACK_RING_FS_PRIORITY`). This was measured on a New 3DS XL
+**FS priority** (`FLASHBACK_FS_PRIORITY`). This was measured on a New 3DS XL
 at full resolution and 30 fps. The write time per frame was the same at low and
 normal priority (~36 ms), and slightly worse at real-time priority (~41 ms). So
 the lowest priority costs nothing, and it keeps the ring file's constant writes
-from getting ahead of the game.
+from getting ahead of the game. The same goes for the big jobs: sizing a new
+ring (up to 3.6 GB to claim) and writing a saved clip's index, all the more as
+a save with the hotkey runs while the game plays. Those used to run at
+Rosalina's real-time priority, and were suspected in Mario Kart 7's sound
+cutting out on saves and length changes. That turned out to be the menu's pause
+(see "The Rosalina menu's pause").
 
 **Aligned writes** (`flashbackSlotStride`). A write that starts partway into one
 of the card's internal blocks costs the card extra work, and the processor too.
@@ -150,3 +155,29 @@ entire data cache instead. On every frame, that also interrupted the game's
 core, and threw away its cached data (and all of the New 3DS's L2 cache). It's
 the same kernel routine (`svcFlushEntireDataCache` passes it an "everything"
 range), just limited to the framebuffer.
+
+## The Rosalina menu's pause
+
+*Code: `menuEnter` (`menu.c`).*
+
+While a Rosalina menu is open, Luma pauses the game, along with the dsp, csnd
+and gsp system modules (`menuEnter`). Some games don't come back cleanly from a
+pause of more than about 8 seconds. That's Luma3DS's own limitation, with or
+without Flashback: [issue #1483](https://github.com/LumaTeam/Luma3DS/issues/1483),
+and [#2099](https://github.com/LumaTeam/Luma3DS/issues/2099), which its
+maintainers closed as an implementation limitation they can't fix.
+
+In Mario Kart 7 (installed on the SD card, New 3DS), the sound stops as the menu
+closes, for 5 to 8 s, and the game can freeze for a few seconds within that.
+Regular Luma3DS does it every time with the menu open for 8 s. A test build
+that kept measurements in each frame's input record showed, for one such cut:
+- The game stopped giving the DSP new audio frames: the frame counter it
+  advances stood still for 7.7 s, so it wasn't just playing silence.
+- The game ran on for ~3 s, then froze for ~3 s, and came back as the sound did.
+- The recorder's own SD writes took their usual 4-85 ms throughout, and HID
+  kept its usual 8 readings a frame.
+
+Changing Flashback's settings, and saving with X, are done from the menu, so
+they count towards that pause (a save from the menu keeps it open for the few
+seconds the save takes). The hotkey saves without opening a menu. The README
+explains the limit to users, as Luma3DS's own.

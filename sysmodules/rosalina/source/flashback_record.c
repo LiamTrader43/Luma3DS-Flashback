@@ -39,12 +39,6 @@
 // screenshot/menu framebuffer cache at 0x0D000000.
 #define FLASHBACK_MEM_ADDR      0x0D800000
 
-// FS priority for the ring file. Rosalina's FS session runs at real-time
-// priority; the ring file's constant writes must not get ahead of the game,
-// and the lowest priority costs them nothing (see docs/flashback-design.md,
-// "SD card writes").
-#define FLASHBACK_RING_FS_PRIORITY  8
-
 // Owned by the flashback thread.
 bool  g_active;                         // memory allocated + ring file open
 u8   *g_mem;
@@ -232,16 +226,17 @@ void flashbackDrainWrites(void)
 // whole ring up front claims the SD space now rather than during gameplay, and
 // a full card fails here instead of mid-recording. Contents don't matter to a
 // new buffer (g_count starts at 0); reopening an existing ring keeps them.
+// (At FLASHBACK_FS_PRIORITY before it's sized: claiming that much of the card
+// takes it a while.)
 Result flashbackOpenRing(FS_Archive archive)
 {
     Result res = IFile_OpenFromArchive(&g_ring, archive, fsMakePath(PATH_ASCII, FLASHBACK_RING_FILE),
                                        FS_OPEN_CREATE | FS_OPEN_READ | FS_OPEN_WRITE);
     if (R_SUCCEEDED(res))
     {
+        FSFILE_SetPriority(g_ring.handle, FLASHBACK_FS_PRIORITY);
         res = IFile_SetSize(&g_ring, g_videoOffset + (u64)g_frames * g_slotStride);
-        if (R_SUCCEEDED(res))
-            FSFILE_SetPriority(g_ring.handle, FLASHBACK_RING_FS_PRIORITY);
-        else
+        if (R_FAILED(res))
             IFile_Close(&g_ring);
     }
     return res;

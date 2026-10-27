@@ -272,8 +272,10 @@ static s32 flashbackSaveClipFile(FS_Archive archive, const char *clip, const Fla
     }
 
     s32 result = (s32)plan->frames;
-    bool ok = R_SUCCEEDED(IFile_OpenFromArchive(&file, archive, fsMakePath(PATH_ASCII, path), FS_OPEN_WRITE)) &&
-              R_SUCCEEDED(IFile_SetSize(&file, dataEnd));
+    bool ok = R_SUCCEEDED(IFile_OpenFromArchive(&file, archive, fsMakePath(PATH_ASCII, path), FS_OPEN_WRITE));
+    if (ok)
+        FSFILE_SetPriority(file.handle, FLASHBACK_FS_PRIORITY);     // (behind the game's reads, as the ring)
+    ok = ok && R_SUCCEEDED(IFile_SetSize(&file, dataEnd));
     if (ok)
     {
         file.pos = dataEnd;
