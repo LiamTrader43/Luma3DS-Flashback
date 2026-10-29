@@ -65,4 +65,5 @@ static bool isHidInitialized = true;
 static void Draw_Lock(void) {}
 static void Draw_Unlock(void) {}
 
+static void flashbackCaptureWait(void) {}
 static bool flashbackCapture(u16 *dst);

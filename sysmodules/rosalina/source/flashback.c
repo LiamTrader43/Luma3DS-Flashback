@@ -51,6 +51,7 @@ bool g_audioRunning;                        // the audio thread exists
 static MyThread flashbackPackThread;
 static u8 CTR_ALIGN(8) flashbackPackStack[0x1000];
 bool g_packRunning;                     // false: frames are packed inline by the capture thread
+bool g_packOnGameCore;                  // the packer runs on the game's core (an Old 3DS)
 
 static MyThread flashbackWriterThread;
 static u8 CTR_ALIGN(8) flashbackWriterStack[0x1000];
@@ -490,10 +491,15 @@ MyThread *flashbackCreateThread(void)
     LightEvent_Init(&g_writeEvent, RESET_ONESHOT);
 
     // The capture, writer and packer threads have the lowest priorities among
-    // Rosalina's threads and run on the system core. The packer, which does
-    // nearly all the work (compressing), is at the bottom, 60; the capture
-    // thread is one step above it, so it captures on time, interrupting the
-    // packer for the few ms that takes. The writer is level with the capture
+    // Rosalina's threads. The packer, which does nearly all the work
+    // (compressing), is at the bottom. On an Old 3DS it runs on the game's
+    // core, below everything there (63), so it only takes the time the game
+    // leaves idle: the system core has too little to spare there. On a New
+    // 3DS, where a game can leave its core too little (Smash dropped frames
+    // that way), or if the game's core turns it down, it runs on the system
+    // core, at 60. The capture thread is one step above that, on the system
+    // core, so it captures on time, interrupting the packer for the few ms
+    // that takes when they share it. The writer is level with the capture
     // thread, above the packer: it hardly uses the CPU (it mostly waits on the
     // SD card), and running first means it sends the next write the moment
     // the previous one finishes. (What was tried before: see
@@ -509,7 +515,11 @@ MyThread *flashbackCreateThread(void)
     g_writerRunning = R_SUCCEEDED(MyThread_Create(&flashbackWriterThread, flashbackWriterThreadMain, flashbackWriterStack,
                                                   sizeof(flashbackWriterStack), 59, CORE_SYSTEM));
     LightEvent_Init(&g_packEvent, RESET_ONESHOT);
-    g_packRunning = R_SUCCEEDED(MyThread_Create(&flashbackPackThread, flashbackPackThreadMain, flashbackPackStack,
+    g_packOnGameCore = !isN3DS && R_SUCCEEDED(MyThread_Create(&flashbackPackThread, flashbackPackThreadMain,
+                                                              flashbackPackStack, sizeof(flashbackPackStack),
+                                                              63, CORE_APPLICATION));
+    g_packRunning = g_packOnGameCore ||
+                    R_SUCCEEDED(MyThread_Create(&flashbackPackThread, flashbackPackThreadMain, flashbackPackStack,
                                                 sizeof(flashbackPackStack), 60, CORE_SYSTEM));
     g_threadRunning = R_SUCCEEDED(MyThread_Create(&flashbackThread, flashbackThreadMain, flashbackThreadStack,
                                                   sizeof(flashbackThreadStack), 59, CORE_SYSTEM));

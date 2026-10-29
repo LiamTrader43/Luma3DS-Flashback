@@ -107,8 +107,12 @@ the check stops and names the instruction.
 **SD test app** (`sdtest/`). Flashback SD test is a 3DS app that writes to the
 SD card like Flashback recording at full resolution, 30 fps and 60 s, with
 sound. It shows how much room for waiting frames the card needs so that
-Flashback never drops a frame. Build it with devkitPro (`make` in `sdtest/`),
-then run `FlashbackSDTest.3dsx` from the Homebrew Launcher. It shows the results
-and saves them to `sd:/flashback_sdtest.txt`. The runner checks the app's logic
-on a PC, against a simulated card with regular slow stretches
-(`sdtest/pc/`).
+Flashback never drops a frame. Its sustained test (X) writes like an Old 3DS
+recording Ocarina of Time 3D with a 10-minute buffer, for 12 minutes, once as
+Flashback writes and once with frames back to back, several in one write, and
+shows the write time per frame and the frames dropped, minute by minute. Build
+it with devkitPro (`make` in `sdtest/`), then run `FlashbackSDTest.3dsx` from
+the Homebrew Launcher. It shows the results and saves them to
+`sd:/flashback_sdtest.txt` (or `flashback_sdtest_sustained.txt`). The runner
+checks the app's logic on a PC, against a simulated card with regular slow
+stretches (`sdtest/pc/`).

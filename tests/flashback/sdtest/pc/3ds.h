@@ -14,6 +14,7 @@ typedef int32_t s32; typedef int64_t s64; typedef s32 Result; typedef u32 Handle
 #define R_SUCCEEDED(r) ((r) >= 0)
 #define SYSCLOCK_ARM11 268111856ULL
 #define KEY_A 1
+#define KEY_X 2
 #define KEY_START 8
 typedef struct { int dummy; } PrintConsole;
 typedef struct { int type; } FS_Path;

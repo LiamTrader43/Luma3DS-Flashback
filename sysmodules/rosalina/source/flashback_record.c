@@ -426,9 +426,10 @@ static bool flashbackPackFrame(void)
         g_winRawFrames++;
     }
 
-    // (Captures interrupt the packer: their time is the capture's, not this.)
+    // (Captures interrupt the packer when they share the system core: their
+    // time is the capture's, not this.)
     u64 t2 = svcGetSystemTick();
-    u32 capTicks = g_capTicksTotal - capTicks1;
+    u32 capTicks = g_packOnGameCore ? 0 : g_capTicksTotal - capTicks1;
     g_winCaptureTicks += g_capTicks[b];
     g_winCompressTicks += t2 - t1 > capTicks ? (t2 - t1) - capTicks : 0;
     g_winPackedBytes += len;
@@ -478,7 +479,9 @@ bool flashbackCaptureFrame(void)
     u32 b = g_capProduced % g_capBufs;
     u16 *frame = (u16 *)(g_mem + g_frameOffset + b * g_capStride);
 
-    // Where the audio is as the frame is captured.
+    // Where the audio is as the frame is captured (after waiting out a buffer
+    // swap that would land mid-read, if one's due: see flashbackCaptureWait).
+    flashbackCaptureWait();
     u32 audioFrame = g_audioProduced;
 
     u64 t0 = svcGetSystemTick();

@@ -71,6 +71,7 @@ static const u32 g_fpsChoices[] = { 10, 20, 30 };
 extern bool g_threadRunning;
 extern bool g_audioRunning;
 extern bool g_packRunning;
+extern bool g_packOnGameCore;
 extern bool g_writerRunning;
 
 // Settings, and saves (flashback.c).
@@ -220,6 +221,7 @@ u32 flashbackCompress(const u16 *cols, u32 width, u32 height, u8 *dst, u32 cap);
 void flashbackColumnsToRows(const u16 *cols, u32 width, u32 height, u16 *dst);
 
 // flashback_framebuffer.c
+void flashbackCaptureWait(void);
 bool flashbackCapture(u16 *dst);
 
 // flashback_input.c
