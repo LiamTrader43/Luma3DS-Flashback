@@ -79,6 +79,9 @@ volatile u32 g_seconds = FLASHBACK_DEFAULT_SECONDS;
 u32 g_w, g_h, g_fps, g_frames;          // derived from g_res / g_fpsIdx / g_seconds
 u32 g_slotBytes, g_frameOffset, g_memSize;
 u32 g_slotStride;                       // ring slot size: g_slotBytes rounded up (flashbackSlotStride)
+u32 g_packedOffset;                     // where a frame is compressed before it's packed with codes, in g_mem
+static u32 g_huffOffset;                // where the codes are built from (g_huff), in g_mem
+FlashbackHuffman *g_huff;
 static u32 g_slotInfoOffset;            // where what's known about the ring's slots is, in g_mem
 
 // Performance stats shown in the menu, updated about once a second while recording.
@@ -110,21 +113,28 @@ u32 flashbackAudioFramesFor(u32 seconds)
 // staging, g_capBufs capture buffers and g_audioStageFrames of audio staging:
 // the staging first, then the capture buffers, which hold frames as captured
 // (before compression), each with a column's worth after it that compressing
-// reads past the frame (flashbackCompress), then the audio staging, then the
-// inputs' ring (flashback_input.c), then what's known about each ring slot
-// (flashbackUseMem). While saving, the clip's inputs and index are built at
-// the start, over the staging and the capture buffers (both empty then: see
-// flashbackSaveClipFile). A long clip's can need more room than those have:
-// then the audio staging starts after that room.
+// reads past the frame (flashbackCompress), then (on a New 3DS: see
+// flashbackPackFrame) a frame compressed before it's packed with Huffman codes
+// (flashbackHuffman) and what those codes are built from, then the audio
+// staging, then the inputs' ring (flashback_input.c), then what's known about
+// each ring slot (flashbackUseMem). While saving, the clip's inputs and index
+// are built at the start, over the staging, the capture buffers and the
+// compressed frame (all empty then: see flashbackSaveClipFile). A long clip's
+// can need more room than those have: then the codes' tables start after that
+// room.
 void flashbackLayout(void)
 {
     g_stageBytes = g_stageSlots * g_slotStride;
     g_frameOffset = (g_stageBytes + 0xFFF) & ~0xFFF;
     g_capStride = (g_slotBytes + g_h * 2 + 0xFFF) & ~0xFFF;
-    g_memSize = g_frameOffset + g_capBufs * g_capStride;
+    g_packedOffset = g_frameOffset + g_capBufs * g_capStride;
+    g_memSize = g_packedOffset + (isN3DS ? (g_slotBytes + 0xFFF) & ~0xFFF : 0);
     u32 tailBytes = (flashbackClipTailMax(g_frames) + 0xFFF) & ~0xFFF;
     if (g_memSize < tailBytes)
         g_memSize = tailBytes;
+    g_huffOffset = g_memSize;
+    if (isN3DS)
+        g_memSize += (sizeof(FlashbackHuffman) + 0xFFF) & ~0xFFF;
     g_audioStageOffset = g_memSize;
     if (g_audio)
         g_memSize += (g_audioStageFrames * FLASHBACK_AUDIO_FRAME_BYTES + 0xFFF) & ~0xFFF;
@@ -136,13 +146,17 @@ void flashbackLayout(void)
 
 // Starts using 'mem' (g_memSize bytes, laid out by flashbackLayout) as the
 // recorder's memory: g_slotLen, g_slotAudioFrame and g_repeat, g_frames of
-// each, are at its end.
+// each, are at its end. The Huffman codes (a New 3DS's) start from no counts
+// (see flashbackHuffman).
 void flashbackUseMem(u8 *mem)
 {
     g_mem = mem;
     g_slotLen = (u32 *)(mem + g_slotInfoOffset);
     g_slotAudioFrame = g_slotLen + g_frames;
     g_repeat = (u16 *)(g_slotAudioFrame + g_frames);
+    g_huff = isN3DS ? (FlashbackHuffman *)(mem + g_huffOffset) : NULL;
+    if (g_huff != NULL)
+        memset(g_huff->counts, 0, sizeof(g_huff->counts));
 }
 
 // Every frame is written starting on a boundary of the card's internal blocks:

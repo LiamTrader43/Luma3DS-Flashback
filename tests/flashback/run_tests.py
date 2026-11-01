@@ -84,6 +84,9 @@ def main():
     if built:
         step('fuzz test', lambda: compile_c(args.cc, 'fuzz', [os.path.join(HERE, 'fuzz.c'), os.path.join(HERE, 'decode.c')], inc)
              and run([os.path.join(BUILD, 'fuzz' + EXE)], cwd=BUILD)[0])
+        step('Huffman test', lambda: compile_c(args.cc, 'huffman', [os.path.join(HERE, 'huffman.c'),
+                                                                 os.path.join(HERE, 'decode.c')], inc)
+             and run([os.path.join(BUILD, 'huffman' + EXE)], cwd=BUILD)[0])
         if args.skip_e2e:
             print('\n(end-to-end test left out)')
         elif platform.system() != 'Windows':

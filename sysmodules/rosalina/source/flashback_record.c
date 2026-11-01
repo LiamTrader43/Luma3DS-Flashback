@@ -412,13 +412,36 @@ static bool flashbackPackFrame(void)
     // With the capture queue one frame from full (the next capture would be
     // dropped), up to 3/4 as many may wait. (Counted from the base, at most:
     // staging beyond it is for the card's slow spells, not for this.)
+    //
+    // On a New 3DS, a compressed frame is packed tighter with Huffman codes (a
+    // fifth less for the card to write: see flashbackHuffman), compressed
+    // first into g_packedOffset for that, unless packing is falling behind
+    // while the card isn't (at most 3/4 as many frames waiting as the base
+    // staging holds): then the processor's time is worth more. An Old 3DS's
+    // processor has no time for them: in Ocarina of Time 3D, with the codes,
+    // eight times as many frames dropped (3885 in 30 minutes, against 456),
+    // while its SD card kept up without them.
     u64 t1 = svcGetSystemTick();
     u32 capTicks1 = g_capTicksTotal;
     u32 queued = g_capProduced - g_capConsumed;
     u32 rawRoom = g_stageSlots < FLASHBACK_STAGE_SLOTS_BASE ? g_stageSlots : FLASHBACK_STAGE_SLOTS_BASE;
     bool storeRaw = queued >= 2 && (staged <= rawRoom / 2 ||
                                     (queued >= g_capBufs - 1 && staged <= rawRoom * 3 / 4));
-    u32 len = storeRaw ? 0 : flashbackCompress(frame, g_w, g_h, stage, g_slotBytes);
+    bool huffman = isN3DS && !storeRaw && (queued < 2 || staged > rawRoom * 3 / 4);
+    u32 len = 0;
+    if (huffman)
+    {
+        u8 *ops = g_mem + g_packedOffset;
+        u32 opsLen = flashbackCompress(frame, g_w, g_h, ops, g_slotBytes);
+        len = opsLen == 0 ? 0 : flashbackHuffman(ops, opsLen, stage);
+        if (len == 0 && opsLen != 0)
+        {
+            memcpy(stage, ops, opsLen);     // (no smaller with codes)
+            len = opsLen;
+        }
+    }
+    else if (!storeRaw)
+        len = flashbackCompress(frame, g_w, g_h, stage, g_slotBytes);
     if (len == 0 || len >= g_slotBytes)
     {
         flashbackColumnsToRows(frame, g_w, g_h, (u16 *)stage);

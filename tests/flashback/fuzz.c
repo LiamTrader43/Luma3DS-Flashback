@@ -28,12 +28,12 @@
 #define FLASHBACK_MAX_FRAMES (FLASHBACK_MAX_SECONDS * 30)  /* the longest clip at the highest frame rate */
 
 /* Flashback Studio's decoder (a copy of 3ds-app/source/flb.c's: decode.c), linked in */
-bool flbDecompress(const uint8_t *src, uint32_t len, uint16_t *dst, uint32_t pixels);
+bool testDecompress(const uint8_t *src, uint32_t len, uint16_t *dst, uint32_t pixels);
 
 #define TINY_W 32
 #define TINY_H 32
 
-static long errors, checks, audioChecked, videoChecked, saves, failedSaves, failStops, stagingFull, runs;
+static long errors, checks, audioChecked, videoChecked, videoPacked, saves, failedSaves, failStops, stagingFull, runs;
 #define FAIL(...) do { errors++; if (errors < 20) printf("  ERROR: " __VA_ARGS__); } while (0)
 
 static u32 g_epoch;
@@ -46,14 +46,18 @@ static int g_inProducer, g_budget, g_reentrantPct;
 static u32 tagFor(u32 k) { return (g_epoch << 22) | (k & 0x3FFFFF) | 0x80000000u; }
 
 /* The frame (upright: its first two pixels carry its id), handed over in the
-   screen's order as the real capture does: column by column, bottom row up. */
+   screen's order as the real capture does: column by column, bottom row up.
+   (Style 3, a dither of the same two colors, compresses to about a byte a
+   pixel, nearly all two INDEX ops: one after another, they're packed with
+   Huffman codes.) */
 static bool flashbackCapture(u16 *dst)
 {
     u16 up[TINY_W * TINY_H];
     u32 id = ++g_nextId;
-    int style = rand() % 3;
+    int style = rand() % 4;
     for (u32 i = 0; i < TINY_W * TINY_H; i++)
-        up[i] = style == 0 ? (u16)(id * 7 + i / 9) : style == 1 ? (u16)rand() : (i % 5 ? up[i - 1] : (u16)rand());
+        up[i] = style == 0 ? (u16)(id * 7 + i / 9) : style == 1 ? (u16)rand() : style == 2 ? (i % 5 ? up[i - 1] : (u16)rand())
+              : (u16)(i % 2 ? 0x1234 : 0x4321);
     up[0] = (u16)id;
     up[1] = (u16)(id >> 16);
     for (u32 y = 0; y < TINY_H; y++)
@@ -304,9 +308,15 @@ static void check(void)
         const u16 *px = (const u16 *)one;
         const u8 *stored = g_ring.data + RING_VIDEO_BASE + (u64)r * g_slotStride;
         bool ok = g_slotLen[r] == g_slotBytes ? (memcpy(one, stored, g_slotBytes), true)
-                                              : flbDecompress(stored, g_slotLen[r], (u16 *)one, TINY_W * TINY_H);
+                                              : testDecompress(stored, g_slotLen[r], (u16 *)one, TINY_W * TINY_H);
         if (!ok || (px[0] | (u32)px[1] << 16) != g_modelSlotId[r])
             FAIL("video slot %u wrong\n", r);
+        if (g_slotLen[r] != g_slotBytes && stored[0] == 0xFF)
+        {
+            videoPacked++;
+            if (!isN3DS)
+                FAIL("an Old 3DS packed slot %u with Huffman codes\n", r);
+        }
         if (g_audio && g_slotAudioFrame[r] != g_modelSlotFrame[r])
             FAIL("slot %u audio frame %u, want %u\n", r, g_slotAudioFrame[r], g_modelSlotFrame[r]);
         videoChecked++;
@@ -346,7 +356,7 @@ static void check(void)
     u32 es = g_audio ? 16 : 12;
     if (size != plan.slots * es + (g_audio ? 32 : 0) + 48) FAIL("index size\n");
     const u32 *t = (const u32 *)(buf + size - 48);
-    if (t[0] != 0x4B424C46 || t[1] != (g_audio ? 3u : 1u) || t[7] != plan.slots || t[8] != plan.frames ||
+    if (t[0] != 0x4B424C46 || t[1] != ((g_audio ? 3u : 1u) | FLASHBACK_CLIP_HUFFMAN) || t[7] != plan.slots || t[8] != plan.frames ||
         t[9] != dataEnd + isize || t[10] != dataEnd || t[11] != 0)
         FAIL("trailer\n");
     for (u32 i = 0; i < plan.slots; i++)
@@ -411,6 +421,7 @@ int main(void)
         u32 seconds = run % 50 == 24 ? FLASHBACK_MIN_SECONDS : run % 50 == 49 ? FLASHBACK_MAX_SECONDS
                     : run % 20 == 19 ? FLASHBACK_MIN_SECONDS + rand() % (FLASHBACK_MAX_SECONDS - FLASHBACK_MIN_SECONDS + 1)
                     : FLASHBACK_MIN_SECONDS + rand() % 120;
+        isN3DS = rand() % 4 != 0;   /* (an Old 3DS a quarter of the time: no Huffman codes, nor memory for them) */
         flashbackApplyFormat(rand() % 2, rand() % 3, seconds, audio);
         /* tiny frames, so the video ring stays small (the audio ring is real size) */
         g_w = TINY_W; g_h = TINY_H;
@@ -453,8 +464,9 @@ int main(void)
 
     printf("%ld runs, %ld checks (%ld saves, %ld failed saves, %ld write-failure stops)\n",
            runs, checks, saves, failedSaves, failStops);
-    printf("audio frames checked %ld, video slots checked %ld, appends refused (staging full) %ld\n",
-           audioChecked, videoChecked, stagingFull);
+    printf("audio frames checked %ld, video slots checked %ld (%ld packed with Huffman codes), appends refused (staging full) %ld\n",
+           audioChecked, videoChecked, videoPacked, stagingFull);
+    if (videoPacked == 0) { printf("  ERROR: no frame was packed with Huffman codes\n"); errors++; }
     printf("inputs: records checked %ld, times HID took more readings than it holds between looks %ld\n",
            g_inputsChecked, g_inputOverruns);
     printf("SD writes %ld, not sector aligned %ld\n", g_writes, g_unaligned);

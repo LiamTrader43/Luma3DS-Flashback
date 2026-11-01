@@ -19,7 +19,7 @@ FUNCTIONS = {
     'flashbackApplyFormat',
     # flashback_compress.c (frames in the tests are compressed for real)
     'flashbackPackHash', 'flashbackUprightBand', 'flashbackPackPixels', 'flashbackCompress',
-    'flashbackColumnsToRows',
+    'flashbackHuffLengths', 'flashbackHuffCodes', 'flashbackHuffman', 'flashbackColumnsToRows',
     # flashback_audio.c
     'flashbackAudioSetCapture', 'flashbackAudioPause', 'flashbackAudioReset', 'flashbackAudioFramesIn',
     'flashbackAudioSamplesFor', 'flashbackAudioWanted', 'flashbackCounterNewer', 'flashbackAppendAudio',

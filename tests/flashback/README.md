@@ -63,6 +63,20 @@ After every drain, it checks exactly that:
   builds them, at the start of the recorder's memory, and must fit in the room
   kept for them there.
 
+**Huffman test** (`huffman.c`). The Huffman codes the recorder packs compressed
+frames with (`flashbackHuffman`). Frames of several kinds (game-like, texture,
+flat, dithered, noise, one color, and ones whose bytes are almost all the same), at both
+resolutions, are packed one after another, as recording does: each frame's
+codes come from the counts of the frame before. Every frame packed must:
+- decode with `decode.c` to exactly the frame;
+- come out smaller than its compressed bytes, and start with 0xFF;
+- leave the counts of its own bytes for the next frame.
+
+A frame that wouldn't come out smaller must give 0. Either way, nothing may be
+written past the room the frame had. The code lengths, from thousands of sets of
+counts (some far more skewed than 12-bit codes can follow), must be 1 to 12
+bits, fill the code space exactly, and be no longer for a more common byte.
+
 **End-to-end test** (`e2e.c`). The recorder's threads run for real, in real
 time:
 - a fake DSP, with every sample numbered;

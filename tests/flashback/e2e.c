@@ -225,7 +225,7 @@ static void check(const char *name, const u8 *clip, u32 size, int expectJumps)
            name, version, frames, entries, stride, rateMhz, cap, first, end, missed);
     /* (positions count from a whole number of rings back: 'first' is 0 only if the ring holds everything since it started) */
     if (end - first != (first == 0 ? end : cap - FLASHBACK_AUDIO_CHUNK_FRAMES * 160) || end > 3 * cap) FAIL("held range\n");
-    if (version != 3 || magic_check(t) || indexOffset + entries * 16 + 32 + 48 != size) FAIL("layout\n");
+    if (version != (FLASHBACK_CLIP_VERSION_AUDIO | FLASHBACK_CLIP_HUFFMAN) || magic_check(t) || indexOffset + entries * 16 + 32 + 48 != size) FAIL("layout\n");
 
     /* inputs: a record for every frame, just before the index; in order (the
        Circle Pad's x is the reading's number: the same again only for grid

@@ -47,6 +47,31 @@
 // pixel from a DIFF, LUMA or RAW op goes into the table at slot
 // flashbackPackHash(pixel); INDEX and RUN leave the table alone. The readers
 // (Flashback-Studio's converter and 3DS app) decode it.
+//
+// On a New 3DS, those bytes are then packed tighter with Huffman codes
+// (flashbackHuffman): each byte value gets a code of 1 to
+// FLASHBACK_HUFF_MAX_BITS bits, the more common the shorter, which makes
+// frames about a fifth smaller (on 7 clips, 18-24%), so the SD card has a
+// fifth less to write, for a few more milliseconds of the processor's time
+// (4 in Ocarina of Time 3D; an Old 3DS hasn't the time: see
+// flashbackPackFrame). Op bytes have one set of codes, and the
+// bytes after ops (LUMA's second, RAW's two) another. A frame packed this way:
+//   byte 0       0xFF: no op starts with it, so no frame of ops does
+//   byte 1       1 (this format)
+//   bytes 2-3    0
+//   bytes 4-7    how many bytes the codes stand for
+//   bytes 8-135  the op bytes' code lengths, 4 bits each: byte value v's in
+//                byte 8 + v / 2, in its low 4 bits for an even v
+//   bytes 136-263  the other bytes' code lengths, the same way
+//   then         the codes, as in Deflate (RFC 1951, 3.1.1 and 3.2.2): each
+//                set's codes are canonical (from the lengths: shorter codes
+//                first, and among the same length, lower byte values first),
+//                each one written first bit first, and the bits fill each
+//                byte from its lowest bit; padded with 0s to a whole number
+//                of 2-byte words (readers check the codes end in the last 2)
+// A frame that wouldn't come out smaller this way is stored as its ops.
+// (Flashback-Studio's tests/codes_test.c makes frames with a copy of this
+// compression: keep it in step.)
 
 // Rows of a frame stored as it is turned upright at a time (see
 // flashbackUprightBand): a cache line holds 16 pixels of a column.
@@ -239,6 +264,182 @@ u32 flashbackCompress(const u16 *cols, u32 width, u32 height, u8 *dst, u32 cap)
         *st.out++ = 0xC0 | (st.run - 1);
     }
     return (u32)(st.out - dst);
+}
+
+// ---------------------------------------------------------------------------
+// Huffman codes over the compressed bytes (the format: see the top of this file)
+// ---------------------------------------------------------------------------
+
+#define FLASHBACK_HUFF_HEADER   264     // bytes before the codes
+#define FLASHBACK_HUFF_BLOCK    64      // bytes packed between checks that the frame still comes out smaller
+
+// The code lengths for the 256 byte values, from how many of each the last
+// frame had: Huffman's algorithm, then any code longer than
+// FLASHBACK_HUFF_MAX_BITS shortened, and others lengthened to make room, as
+// zlib does. Every value is counted once more, so it gets a code even if the
+// last frame had none of it (this one may).
+static void flashbackHuffLengths(const u32 *counts, u8 *lengths)
+{
+    FlashbackHuffman *h = g_huff;
+    u32 *order = h->order, *weight = h->weight;
+
+    // The values by count, fewest first (a Shell sort: 256 of them).
+    for (u32 v = 0; v < 256; v++)
+        order[v] = (counts[v] + 1) << 8 | v;
+    static const u8 gaps[] = { 132, 57, 23, 10, 4, 1 };
+    for (u32 g = 0; g < sizeof(gaps); g++)
+        for (u32 i = gaps[g]; i < 256; i++)
+        {
+            u32 key = order[i], j = i;
+            for (; j >= gaps[g] && order[j - gaps[g]] > key; j -= gaps[g])
+                order[j] = order[j - gaps[g]];
+            order[j] = key;
+        }
+
+    // The tree: the leaves are weight[0..255] (in that order), and each node
+    // made joins the two lightest of the leaves and nodes not yet joined (the
+    // nodes are made lightest first, so those are at the front of each).
+    for (u32 i = 0; i < 256; i++)
+        weight[i] = order[i] >> 8;
+    u32 leaf = 0, node = 256;
+    for (u32 made = 256; made < 511; made++)
+    {
+        u32 a = leaf < 256 && (node == made || weight[leaf] <= weight[node]) ? leaf++ : node++;
+        u32 b = leaf < 256 && (node == made || weight[leaf] <= weight[node]) ? leaf++ : node++;
+        weight[made] = weight[a] + weight[b];
+        h->parent[a] = h->parent[b] = (u16)made;
+    }
+    h->depth[510] = 0;
+    for (u32 i = 510; i-- != 0;)
+        h->depth[i] = h->depth[h->parent[i]] + 1;
+
+    // How many codes of each length, the longest ones cut down to the limit:
+    // while the codes don't fit (their share of the code space, sum(2^-length),
+    // is over 1), one at the limit goes, and a shorter one splits in two one
+    // bit longer (it's still one, and the one that went fits back in).
+    u32 perLength[FLASHBACK_HUFF_MAX_BITS + 1] = { 0 };
+    for (u32 i = 0; i < 256; i++)
+        perLength[h->depth[i] < FLASHBACK_HUFF_MAX_BITS ? h->depth[i] : FLASHBACK_HUFF_MAX_BITS]++;
+    u32 space = 0;
+    for (u32 n = 1; n <= FLASHBACK_HUFF_MAX_BITS; n++)
+        space += perLength[n] << (FLASHBACK_HUFF_MAX_BITS - n);
+    for (; space > 1u << FLASHBACK_HUFF_MAX_BITS; space--)
+    {
+        perLength[FLASHBACK_HUFF_MAX_BITS]--;
+        for (u32 n = FLASHBACK_HUFF_MAX_BITS - 1; n > 0; n--)
+            if (perLength[n] != 0)
+            {
+                perLength[n]--;
+                perLength[n + 1] += 2;
+                break;
+            }
+    }
+
+    // The longest codes to the rarest values.
+    u32 i = 0;
+    for (u32 n = FLASHBACK_HUFF_MAX_BITS; n > 0; n--)
+        for (u32 k = perLength[n]; k != 0; k--)
+            lengths[order[i++] & 0xFF] = (u8)n;
+}
+
+// The canonical codes for those lengths (see the top of this file), each
+// reversed to go out first bit first from the lowest bit: code | length << 16.
+static void flashbackHuffCodes(const u8 *lengths, u32 *codes)
+{
+    u32 perLength[FLASHBACK_HUFF_MAX_BITS + 1] = { 0 }, next[FLASHBACK_HUFF_MAX_BITS + 1];
+    for (u32 v = 0; v < 256; v++)
+        perLength[lengths[v]]++;
+    u32 code = 0;
+    for (u32 n = 1; n <= FLASHBACK_HUFF_MAX_BITS; n++)
+    {
+        code = (code + perLength[n - 1]) << 1;
+        next[n] = code;
+    }
+    for (u32 v = 0; v < 256; v++)
+    {
+        u32 n = lengths[v], c = next[n]++, reversed = 0;
+        for (u32 k = 0; k < n; k++)
+            reversed = reversed << 1 | (c >> k & 1);
+        codes[v] = reversed | n << 16;
+    }
+}
+
+// Packs the 'len' bytes at 'src' (a frame from flashbackCompress) into 'dst'
+// with Huffman codes from the last frame's counts, counting this frame's for
+// the next (see the top of this file). Returns the packed size, or 0 if it
+// wouldn't be smaller than 'len' (store the bytes as they are). 'dst' has room
+// for 'len' bytes. Packer thread (g_huff).
+u32 flashbackHuffman(const u8 *src, u32 len, u8 *dst)
+{
+    if (len <= FLASHBACK_HUFF_HEADER + 2 * FLASHBACK_HUFF_BLOCK)
+        return 0;   // (too small to come out smaller)
+
+    FlashbackHuffman *h = g_huff;
+    u8 lengths[256];
+    dst[0] = 0xFF;
+    dst[1] = 1;
+    dst[2] = dst[3] = 0;
+    memcpy(dst + 4, &len, 4);
+    for (u32 set = 0; set < 2; set++)
+    {
+        flashbackHuffLengths(h->counts[set], lengths);
+        flashbackHuffCodes(lengths, h->codes[set]);
+        for (u32 v = 0; v < 256; v += 2)
+            dst[8 + set * 128 + v / 2] = (u8)(lengths[v] | lengths[v + 1] << 4);
+    }
+    memset(h->counts, 0, sizeof(h->counts));
+
+    // The codes go into 'bits' (n of them so far), out 16 at a time: under 16
+    // are left after each code, and a code is at most 12 more. A block's codes
+    // (FLASHBACK_HUFF_BLOCK bytes, and the up to 2 after its last op) take at
+    // most 1.5 bytes each, and the last bits 2 more: as long as each block
+    // starts that far (and 1 more) before 'len', the frame comes out smaller.
+    u32 *opCounts = h->counts[0], *argCounts = h->counts[1];
+    const u32 *opCodes = h->codes[0], *argCodes = h->codes[1];
+    const u8 *p = src, *end = src + len;
+    u16 *out = (u16 *)(dst + FLASHBACK_HUFF_HEADER);
+    const u16 *last = (const u16 *)(dst + len - (FLASHBACK_HUFF_BLOCK + 2) * 3 / 2 - 2 - 1);
+    u32 bits = 0, n = 0;
+    while (p < end)
+    {
+        if (out > last)
+            return 0;
+        const u8 *stop = (u32)(end - p) > FLASHBACK_HUFF_BLOCK ? p + FLASHBACK_HUFF_BLOCK : end;
+        do
+        {
+            u32 b = *p++;
+            opCounts[b]++;
+            u32 c = opCodes[b];
+            bits |= (c & 0xFFFF) << n;
+            n += c >> 16;
+            if (n >= 16)
+            {
+                *out++ = (u16)bits;
+                bits >>= 16;
+                n -= 16;
+            }
+            if (b - 0x80 < 0x40 || b == FLASHBACK_PACK_RAW)     // LUMA's second byte, or RAW's two
+            {
+                for (u32 k = b == FLASHBACK_PACK_RAW ? 2 : 1; k != 0; k--)
+                {
+                    b = *p++;
+                    argCounts[b]++;
+                    c = argCodes[b];
+                    bits |= (c & 0xFFFF) << n;
+                    n += c >> 16;
+                    if (n >= 16)
+                    {
+                        *out++ = (u16)bits;
+                        bits >>= 16;
+                        n -= 16;
+                    }
+                }
+            }
+        } while (p < stop);
+    }
+    if (n != 0)
+        *out++ = (u16)bits;
+    return (u32)((u8 *)out - dst);
 }
 
 // The upright frame (top row first), from a frame in the screen's order (see

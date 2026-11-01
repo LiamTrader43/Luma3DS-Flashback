@@ -96,8 +96,10 @@ static u32 flashbackAudioSampleOf(u32 frame)
 // those readers in step with any change here.
 //
 // Version 1, recorded without audio:
-//   [ring slots]    slot i at offset i * slotStride: a compressed frame, or the
-//                   raw frame if its size is slotBytes (see flashbackCompress)
+//   [ring slots]    slot i at offset i * slotStride: a compressed frame (packed
+//                   with Huffman codes if it starts with 0xFF), or the raw
+//                   frame if its size is slotBytes (see the top of
+//                   flashback_compress.c)
 //   [inputs]        FlashbackClipInputs, then frameCount x FlashbackInput: the
 //                   inputs during each of the clip's frames, copies included
 //                   (see flashback_input.c). Where they start is the trailer's
@@ -123,10 +125,15 @@ static u32 flashbackAudioSampleOf(u32 frame)
 //
 // (Version 2 is a clip without audio, compacted by Flashback Studio.)
 // All values little-endian. Frames are RGB565, top row first.
+//
+// FLASHBACK_CLIP_HUFFMAN in the version: frames may be packed with Huffman
+// codes (see flashbackHuffman). Readers from before that turn such a clip down
+// as made by a newer Flashback, rather than showing it wrong.
 
 #define FLASHBACK_CLIP_MAGIC            0x4B424C46  // "FLBK"
 #define FLASHBACK_CLIP_VERSION          1
 #define FLASHBACK_CLIP_VERSION_AUDIO    3
+#define FLASHBACK_CLIP_HUFFMAN          0x100
 
 typedef struct FlashbackClipTrailer {
     u32 magic;
@@ -223,7 +230,7 @@ static u32 flashbackBuildClipIndex(const FlashbackClipPlan *plan, u32 indexOffse
     FlashbackClipTrailer *t = (FlashbackClipTrailer *)entry;
     memset(t, 0, sizeof(*t));
     t->magic = FLASHBACK_CLIP_MAGIC;
-    t->version = g_audio ? FLASHBACK_CLIP_VERSION_AUDIO : FLASHBACK_CLIP_VERSION;
+    t->version = (g_audio ? FLASHBACK_CLIP_VERSION_AUDIO : FLASHBACK_CLIP_VERSION) | FLASHBACK_CLIP_HUFFMAN;
     t->width = g_w;
     t->height = g_h;
     t->fps = g_fps;

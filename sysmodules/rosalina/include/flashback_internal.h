@@ -182,6 +182,24 @@ extern u32 g_capStride;
 extern u32 g_pendingMissed;
 extern LightEvent g_packEvent;
 
+// Huffman codes over compressed frames (flashbackHuffman), on a New 3DS: a
+// frame is compressed into g_packedOffset in g_mem first, then packed with
+// codes into staging. What packing keeps from one frame to the next, and builds
+// the codes with, is in g_mem too (flashbackLayout, flashbackUseMem). Packer
+// thread.
+#define FLASHBACK_HUFF_MAX_BITS     12      // the longest code
+typedef struct FlashbackHuffman {
+    u32 counts[2][256];     // the last frame's bytes (op bytes, then the bytes after ops), then this one's
+    u32 codes[2][256];      // this frame's codes: the code (first bit lowest) | its length << 16
+    u32 order[256];         // building: the byte values by count (count << 8 | value)
+    u32 weight[511];        // ...the leaves in that order, then the nodes as they're made
+    u16 parent[511];        // ...each one's parent
+    u8  depth[511];         // ...and how deep it is
+} FlashbackHuffman;
+
+extern u32 g_packedOffset;
+extern FlashbackHuffman *g_huff;
+
 // Inputs (flashback_input.c): a record of them for every grid slot, in a ring
 // of g_frames records in g_mem from g_inputOffset (flashbackLayout).
 typedef struct FlashbackInput {
@@ -218,6 +236,7 @@ bool flashbackIsSdMode(void);
 
 // flashback_compress.c
 u32 flashbackCompress(const u16 *cols, u32 width, u32 height, u8 *dst, u32 cap);
+u32 flashbackHuffman(const u8 *src, u32 len, u8 *dst);
 void flashbackColumnsToRows(const u16 *cols, u32 width, u32 height, u16 *dst);
 
 // flashback_framebuffer.c

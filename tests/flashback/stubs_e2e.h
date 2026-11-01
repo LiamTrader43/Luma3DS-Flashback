@@ -100,5 +100,8 @@ static bool isHidInitialized = true;
 static void Draw_Lock(void) {}
 static void Draw_Unlock(void) {}
 
+/* Which 3DS it is (Rosalina's): a New 3DS packs frames with Huffman codes */
+static bool isN3DS = true;
+
 static void flashbackCaptureWait(void) {}
 static bool flashbackCapture(u16 *dst);
