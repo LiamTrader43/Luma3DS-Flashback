@@ -5,8 +5,8 @@
 
 *Fork of Luma3DS that adds a flashback record option*
 
-![Boot menu screenshot](img/boot_menu_v1321.png)
-![Rosalina menu screenshot](img/rosalina_menu_v1321.png)
+![Boot menu screenshot](img/boot_menu_v135.png)
+![Rosalina menu screenshot](img/rosalina_menu_v135.png)
 
 > **This is an unofficial fork.** It is not made or supported by the Luma3DS team. Please report Flashback issues here, not to the official Luma3DS repository.
 
@@ -22,10 +22,10 @@ It records at **full resolution and 30 fps on both the Old and New 3DS/2DS**. Wh
 
 Flashback is a complete Luma3DS build, so it needs [boot9strap](https://github.com/SciresM/boot9strap) like regular Luma3DS. Download `boot.firm` from [this fork's latest release](https://github.com/LiamTrader43/Luma3DS-Flashback/releases/latest), then choose one of these:
 
-* **Try it alongside your current Luma3DS (recommended):** rename and copy `boot.firm` to `/luma/payloads/y_flashback.firm` on your SD card. Hold <kbd>Y</kbd> while powering on to boot Flashback; power on normally to boot your usual Luma3DS. (When started this way, Flashback won't chainload any further payloads, so holding <kbd>Y</kbd> too long is fine. To start a different payload, boot your usual Luma3DS.)
+* **Try it alongside your current Luma3DS (recommended):** rename and copy `boot.firm` to `/luma/payloads/y_flashback.firm` on your SD card. Hold <kbd>Y</kbd> while powering on to boot Flashback; power on normally to boot your usual Luma3DS. (When started this way, Flashback won't chainload any further payloads, so holding <kbd>Y</kbd> too long is fine. To start a different payload, boot your usual Luma3DS.) Your usual Luma3DS needs to be [v13.5](https://github.com/LumaTeam/Luma3DS/releases/tag/v13.5), the version Flashback is built on: with an older one, the configuration menu appears at every boot and Luma's settings keep resetting.
 * **Use it as your main Luma3DS:** replace `boot.firm` in the root of your SD card. Keep a copy of your old `boot.firm` in case you want to go back.
 
-To check that you're running Flashback, open the Rosalina menu (<kbd>L+Down+Select</kbd>): the bottom line reads **"Luma3DS v13.4 (Flashback)"** and the menu has a **Flashback recorder** entry.
+To check that you're running Flashback, open the Rosalina menu (<kbd>L+Down+Select</kbd>): the bottom line reads **"Luma3DS v13.5 (Flashback)"** and the menu has a **Flashback recorder** entry.
 
 ### Recording and saving a clip
 
