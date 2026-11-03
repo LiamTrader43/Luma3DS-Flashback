@@ -6,8 +6,9 @@
 
 https://github.com/user-attachments/assets/76ac9ae6-6eb3-4fe5-a946-18c9b925d975
 
-**The Switch's capture button, for the 3DS.** Press a button combo and up to the last 10 minutes of your game are saved as a clip, with sound, in any game, on every 3DS and 2DS.
+**The Switch's capture button, but for the 3DS.** Press a button combo and up to the last 10 minutes of your game are saved as a clip, with sound, in any game, on every 3DS and 2DS.
 
+> [!NOTE]  
 > **This is an unofficial fork of Luma3DS.** It isn't made or supported by the Luma3DS team, so please report problems [here](https://github.com/LiamTrader43/Luma3DS-Flashback/issues) or on the [Flashback Discord](https://discord.gg/N3TTXP5WB2), not to Luma3DS.
 
 ## What you need
@@ -24,7 +25,7 @@ https://github.com/user-attachments/assets/76ac9ae6-6eb3-4fe5-a946-18c9b925d975
 3. Get [Flashback Studio](https://github.com/LiamTrader43/Flashback-Studio/releases/latest) for your 3DS, your PC, or both. Clips from Flashback v3.0 and newer need Flashback Studio v3.1 or newer.
 4. **Hold <kbd>Y</kbd> while turning on your 3DS** to start Flashback. Turn it on normally and your usual Luma3DS starts instead.
 
-Then, to save a clip:
+### Then, to save a clip:
 
 1. Open the Rosalina menu (<kbd>L+Down+Select</kbd>) and choose **Flashback recorder**.
 2. Press <kbd>A</kbd> to turn recording on, then <kbd>B</kbd> twice to go back to your game.
@@ -32,7 +33,7 @@ Then, to save a clip:
 
 Clips are saved to `/luma/flashback/` on your SD card. Open them with Flashback Studio: on the 3DS to watch, trim and compact them, or on Windows to also export them as MP4 videos.
 
-Good to know:
+### Good to know:
 
 * Recording is off after every restart, so turn it on again each time. Your settings are remembered.
 * Close the Rosalina menu within about 7 seconds. Some games lose their sound for a while after the menu has been open longer (a Luma3DS issue, not a Flashback one). Saving with the combo never opens the menu.
