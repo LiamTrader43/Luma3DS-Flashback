@@ -56,6 +56,26 @@ typedef enum FlashbackResolution {
     FLASHBACK_RES_COUNT,
 } FlashbackResolution;
 
+// Which screens are recorded.
+typedef enum FlashbackScreens {
+    FLASHBACK_SCREENS_TOP = 0,  // the top screen
+    FLASHBACK_SCREENS_BOTH,     // and the bottom screen (320 x 240, or 160 x 120 at half resolution)
+    FLASHBACK_SCREENS_COUNT,
+} FlashbackScreens;
+
+// With both recorded, which screen comes first. The first screen is recorded
+// as when it's recorded alone: captured with every frame, and its frames always
+// stored. The other one, the second screen, gets the time and the room that
+// are left: it isn't captured with every frame, and a frame of its that doesn't
+// fit isn't stored (see flashbackCapture, flashbackPackFrame). So when an Old
+// 3DS or a slow SD card can't keep up with both, it's the second screen that
+// goes without. With one screen recorded, that's the first.
+typedef enum FlashbackPriority {
+    FLASHBACK_PRIORITY_TOP = 0,
+    FLASHBACK_PRIORITY_BOTTOM,
+    FLASHBACK_PRIORITY_COUNT,
+} FlashbackPriority;
+
 static const u32 g_fpsChoices[] = { 10, 20, 30 };
 #define FLASHBACK_FPS_CHOICES   (sizeof(g_fpsChoices) / sizeof(g_fpsChoices[0]))
 
@@ -77,6 +97,8 @@ extern bool g_writerRunning;
 // Settings, and saves (flashback.c).
 extern volatile bool g_enabled;
 extern volatile u32  g_wantRes;
+extern volatile u32  g_wantScreens;
+extern volatile u32  g_wantPriority;
 extern volatile u32  g_wantFpsIdx;
 extern volatile u32  g_wantSeconds;
 extern volatile u32  g_saveCombo;
@@ -90,19 +112,68 @@ extern char g_lastClip[96];
 extern volatile u32 g_res;
 extern volatile u32 g_fpsIdx;
 extern volatile u32 g_seconds;
+extern volatile u32 g_screens;
+extern volatile u32 g_priority;            // FlashbackPriority in effect (the top screen's, with one screen)
 extern u32 g_w, g_h, g_fps, g_frames;
 extern u32 g_slotBytes, g_frameOffset, g_memSize;
 extern u32 g_slotStride;
+extern u32 g_botW, g_botH, g_botBytes;     // the bottom screen's frames (0 when it isn't recorded)
+// The same sizes by which screen comes first (flashbackLayout).
+extern bool g_priBottom;                   // the first screen is the bottom one
+extern u32 g_priW, g_priH, g_priBytes;     // the first screen's frames
+extern u32 g_secW, g_secH, g_secBytes;     // the second screen's (0 when only one is recorded)
+extern u32 g_secOffset, g_secStride;       // the second screen's capture buffers in g_mem: the first, and bytes between them
+extern u32 g_ringSlots;                    // the ring's slots (flashbackRingSlots)
+
+// A ring slot holds what's new at one moment (a grid slot of the recording):
+// the top screen's frame, the bottom screen's, or both. Nothing is stored for a
+// screen that's the same as in the frame before, and no slot at all is used
+// when both are: the slot before it is shown for one more grid slot instead.
+// So a still picture costs the SD card nothing.
+//
+// A frame is stored whole, or as what changed since the frame before it on the
+// same screen (see the top of flashback_compress.c), which takes far less
+// while much of the picture stays put. Reading such a frame takes the frames
+// before it, back to a whole one. So every FLASHBACK_KEY_SLOTS slots, each
+// screen is stored whole whatever it shows (the first screen's frame in every
+// FLASHBACK_KEY_SLOTS-th slot, the second screen's with its next frame from
+// then on), and a clip starts with the slots from the ones with whole frames
+// before its first frame (see flashbackPlanClip): at most FLASHBACK_LEAD_MAX
+// back, which allows for a second screen that's captured a few frames late.
+//
+// Both screens' frames go in the same slot: the top screen's, then the bottom
+// screen's, whichever comes first. The second screen's whole frame, when it's
+// due and there isn't room for it there, gets a slot of its own, the one
+// before (FLASHBACK_FRAME_UNSHOWN): a slot that's only read, for what it
+// leaves on that screen, and shown for no time. So the ring has more slots
+// than the longest clip has frames (flashbackRingSlots): the ones a clip
+// starts with, and with both screens recorded, one in every
+// FLASHBACK_KEY_SLOTS for those.
+#define FLASHBACK_KEY_SLOTS         30
+#define FLASHBACK_LEAD_MAX          (FLASHBACK_KEY_SLOTS + 8)
+
+// How a slot's frames are stored (also in a clip's index: flashback_clip.c).
+#define FLASHBACK_FRAME_TOP_DELTA       0x01    // the top screen's: what changed since the frame before
+#define FLASHBACK_FRAME_TOP_CODES       0x02    // ...packed with Huffman codes
+#define FLASHBACK_FRAME_BOTTOM_DELTA    0x04    // the same, for the bottom screen's
+#define FLASHBACK_FRAME_BOTTOM_CODES    0x08
+#define FLASHBACK_FRAME_STORED          0x0F    // (the ones a clip's index has)
+#define FLASHBACK_FRAME_UNSHOWN         0x10    // in the ring only: the slot is shown for no time (0 copies in a clip's index)
+
+u32 flashbackRingSlots(u32 frames, bool bottom);
 
 // The ring (flashback_record.c). What's known about each of its slots is in
-// g_mem, g_frames of each (flashbackLayout, flashbackUseMem).
+// g_mem, g_ringSlots of each (flashbackLayout, flashbackUseMem).
 extern bool  g_active;
 extern u8   *g_mem;
 extern IFile g_ring;
 extern u32   g_head;
 extern volatile u32 g_count;
-extern u16  *g_repeat;
-extern u32  *g_slotLen;
+extern u16  *g_repeat;          // grid slots a slot is shown for after its own...
+extern u16  *g_missed;          // ...of which because their capture was missed (the others: nothing had changed)
+extern u32  *g_slotLen;         // the top screen's frame's size (0: the same as before)
+extern u32  *g_slotBotLen;      // the bottom screen's, after it (0: the same as before, or not recorded)
+extern u8   *g_slotFlags;       // FLASHBACK_FRAME_*
 
 // Audio (flashback_audio.c).
 #define FLASHBACK_AUDIO_FRAME_SAMPLES   160
@@ -124,7 +195,6 @@ extern u32  *g_slotLen;
 // is all still there when it's saved.
 #define FLASHBACK_AUDIO_EXTRA_SECONDS   2
 
-extern volatile bool g_wantAudio;
 extern volatile bool g_audio;
 extern u32 g_audioCapFrames;
 extern u32 g_audioBytes;
@@ -175,11 +245,43 @@ extern LightEvent g_writeEvent;
 // memory for (see flashbackStart), up to FLASHBACK_CAPTURE_BUFS_MAX; with 1
 // the capture waits for each compression again. Frame number p goes to buffer
 // p % g_capBufs (a power of two, as with the staging entries).
+//
+// With more than one buffer, the one before the frame being packed is never
+// captured into: it holds the frame before, which this one is compared with
+// (see flashbackPackFrame). So one fewer frame can wait than there are buffers.
+//
+// The second screen has as many buffers of its own (g_secOffset), filled only
+// when it's captured, which isn't with every frame (see flashbackCapture). One
+// of them holds the last of its frames that was stored, which the next ones
+// are compared with, however many frames go by (and however many of its frames
+// aren't stored: see flashbackPackFrame); a capture goes into one that neither
+// holds that nor a frame waiting to be packed. There's always one: at most
+// g_capBufs - 1 frames wait.
 #define FLASHBACK_CAPTURE_BUFS_MAX  4
+#define FLASHBACK_NO_BUFFER         0xFF
 
+// How much of a frame is as it was in the one before (flashbackSameShare).
+#define FLASHBACK_SAME_ALL          256     // all of it
+#define FLASHBACK_SAME_STEP         1024    // bytes between the words compared first
+// A frame is stored as what changed only if at least this much of it (of 255)
+// hasn't: half. With less, that takes an Old 3DS longer than storing it whole
+// does (in assembly), and saves little or nothing: on clips of Smash Bros., a
+// quarter instead made frames 14% bigger. Mario Kart 7 and Smash Bros. are
+// mostly under it; 2D games and still cameras are far over.
+#define FLASHBACK_DELTA_MIN_SAME    128
+
+// The second screen is captured after the first when its read fits before the
+// game's next buffer swap, and otherwise at least every this many frames, after
+// waiting the swap out; on an Old 3DS, only every this many frames (see
+// flashbackCapture). Except while its whole frame is due (g_secKeyDue, the
+// packer's: see flashbackPackFrame), when it's captured with the next frame.
+#define FLASHBACK_BOTTOM_MAX_GAP    2
+
+extern volatile bool g_secKeyDue;
 extern u32 g_capBufs;
 extern u32 g_capStride;
 extern u32 g_pendingMissed;
+extern u64 g_capWaited;
 extern LightEvent g_packEvent;
 
 // Huffman codes over compressed frames (flashbackHuffman), on a New 3DS: a
@@ -198,7 +300,7 @@ typedef struct FlashbackHuffman {
 } FlashbackHuffman;
 
 extern u32 g_packedOffset;
-extern FlashbackHuffman *g_huff;
+extern FlashbackHuffman *g_huff;    // two: the top screen's, then the bottom screen's
 
 // Inputs (flashback_input.c): a record of them for every grid slot, in a ring
 // of g_frames records in g_mem from g_inputOffset (flashbackLayout).
@@ -236,12 +338,14 @@ bool flashbackIsSdMode(void);
 
 // flashback_compress.c
 u32 flashbackCompress(const u16 *cols, u32 width, u32 height, u8 *dst, u32 cap);
-u32 flashbackHuffman(const u8 *src, u32 len, u8 *dst);
+u32 flashbackSameShare(const u16 *frame, const u16 *ref, u32 bytes, u32 *sameUpTo);
+u32 flashbackCompressDelta(const u16 *cols, const u16 *ref, u32 pixels, u8 *dst, u32 cap, u32 start);
+u32 flashbackHuffman(FlashbackHuffman *h, const u8 *src, u32 len, u8 *dst);
 void flashbackColumnsToRows(const u16 *cols, u32 width, u32 height, u16 *dst);
 
 // flashback_framebuffer.c
 void flashbackCaptureWait(void);
-bool flashbackCapture(u16 *dst);
+bool flashbackCapture(u16 *first, u16 *second, bool *secondOk);
 
 // flashback_input.c
 void flashbackInputReset(void);
@@ -263,10 +367,17 @@ static inline u32 flashbackAudioSamplesFor(u32 frames)
     return (u32)((u64)frames * SYSCLOCK_ARM11 / ((u64)g_fps * 8192));
 }
 
-// Audio is recorded only if the audio thread could be started.
+// The screen that comes first, as chosen in the menu: the top one, when only
+// it is recorded.
+static inline u32 flashbackPriorityWanted(void)
+{
+    return g_wantScreens == FLASHBACK_SCREENS_BOTH ? g_wantPriority : (u32)FLASHBACK_PRIORITY_TOP;
+}
+
+// Audio is always recorded, if the audio thread could be started.
 static inline bool flashbackAudioWanted(void)
 {
-    return g_wantAudio && g_audioRunning;
+    return g_audioRunning;
 }
 
 // FS priority for the recorder's files: the ring, and a clip as it's saved.
@@ -282,6 +393,8 @@ Result flashbackCreateDirectory(FS_Archive archive, const char *path);
 void flashbackWriterThreadMain(void);
 void flashbackDrainWrites(void);
 Result flashbackOpenRing(FS_Archive archive);
+void flashbackForgetFrames(void);
+void flashbackNewRing(void);
 Result flashbackStart(void);
 void flashbackDrainCaptures(void);
 void flashbackStop(void);
@@ -289,12 +402,16 @@ bool flashbackCaptureFrame(void);
 void flashbackPackThreadMain(void);
 
 // flashback_clip.c
-// Which ring slots make up a clip of the chosen length, oldest first,
-// with each slot repeated 1 + g_repeat[] times to fill missed frames.
+// Which ring slots make up a clip of the chosen length, oldest first, with
+// each slot shown 1 + g_repeat[] times (while nothing changed, or captures
+// were missed). Before them come the 'lead' slots a reader needs to make out
+// the first one: from the last slot with whole frames on (read, not shown).
 typedef struct FlashbackClipPlan {
-    u32 slots;          // number of ring slots used
+    u32 slots;          // number of ring slots shown
     u32 trimFirst;      // repeats to drop from the oldest slot (clip would be too long)
     u32 frames;         // frames in the clip, duplicates included
+    u32 lead;           // slots before them, only read
+    u32 missed;         // frames whose capture was missed
 } FlashbackClipPlan;
 FlashbackClipPlan flashbackPlanClip(void);
 u32 flashbackClipTailMax(u32 frames);

@@ -61,8 +61,7 @@
 #define FLASHBACK_DSP_FINAL_OFFSET      0xA80       // DSP address 0x8540 (word) in region 0
 #define FLASHBACK_DSP_COUNTER_OFFSET    0x7FFE      // DSP address 0xBFFF: the frame counter
 
-volatile bool g_wantAudio = true;           // chosen in the menu
-volatile bool g_audio;                      // in effect (part of the recording format)
+volatile bool g_audio;                      // audio is recorded (part of the recording format: flashbackAudioWanted)
 u32 g_audioCapFrames;                       // audio ring capacity in frames (0 without audio)
 u32 g_audioBytes;                           // the audio ring's size
 u32 g_videoOffset;                          // where the video slots start in the ring file (flashbackVideoOffset)

@@ -62,6 +62,8 @@ volatile bool g_enabled;                // user toggle
 // 30 seconds. (An Old 3DS keeps up at full resolution too: Mario Kart 7 drops
 // only a few frames a race.)
 volatile u32  g_wantRes = FLASHBACK_RES_FULL;          // FlashbackResolution chosen in the menu
+volatile u32  g_wantScreens = FLASHBACK_SCREENS_TOP;   // FlashbackScreens chosen in the menu
+volatile u32  g_wantPriority = FLASHBACK_PRIORITY_TOP; // FlashbackPriority chosen in the menu
 volatile u32  g_wantFpsIdx = 2;                        // index into g_fpsChoices chosen in the menu (30 fps)
 volatile u32  g_wantSeconds = FLASHBACK_DEFAULT_SECONDS; // clip length chosen in the menu
 volatile u32  g_saveCombo = FLASHBACK_DEFAULT_SAVE_COMBO;
@@ -74,11 +76,19 @@ char g_lastClip[96];
 // Recording format currently in effect. Written only by the flashback thread
 // (when nothing is recording); read by the menu for display.
 volatile u32 g_res = FLASHBACK_RES_FULL;
+volatile u32 g_screens = FLASHBACK_SCREENS_TOP;
+volatile u32 g_priority = FLASHBACK_PRIORITY_TOP;
 volatile u32 g_fpsIdx = 2;
 volatile u32 g_seconds = FLASHBACK_DEFAULT_SECONDS;
 u32 g_w, g_h, g_fps, g_frames;          // derived from g_res / g_fpsIdx / g_seconds
 u32 g_slotBytes, g_frameOffset, g_memSize;
 u32 g_slotStride;                       // ring slot size: g_slotBytes rounded up (flashbackSlotStride)
+u32 g_botW, g_botH, g_botBytes;         // the bottom screen's frames, from g_res / g_screens (0: not recorded)
+bool g_priBottom;                       // the first screen is the bottom one (g_priority, with both recorded)
+u32 g_priW, g_priH, g_priBytes;         // the first screen's frames (flashbackLayout)
+u32 g_secW, g_secH, g_secBytes;         // the second screen's (0: only one is recorded)
+u32 g_secOffset, g_secStride;           // the second screen's capture buffers, in g_mem
+u32 g_ringSlots;                        // the ring's slots (see FLASHBACK_KEY_SLOTS)
 u32 g_packedOffset;                     // where a frame is compressed before it's packed with codes, in g_mem
 static u32 g_huffOffset;                // where the codes are built from (g_huff), in g_mem
 FlashbackHuffman *g_huff;
@@ -112,51 +122,70 @@ u32 flashbackAudioFramesFor(u32 seconds)
 // Where things are in the recorder's memory, for g_stageSlots frames' worth of
 // staging, g_capBufs capture buffers and g_audioStageFrames of audio staging:
 // the staging first, then the capture buffers, which hold frames as captured
-// (before compression), each with a column's worth after it that compressing
-// reads past the frame (flashbackCompress), then (on a New 3DS: see
+// (before compression): the first screen's, then as many for the second screen
+// if both are recorded (g_secOffset), each with a column's worth after it that
+// compressing reads past the frame (flashbackCompress), then (on a New 3DS: see
 // flashbackPackFrame) a frame compressed before it's packed with Huffman codes
-// (flashbackHuffman) and what those codes are built from, then the audio
-// staging, then the inputs' ring (flashback_input.c), then what's known about
-// each ring slot (flashbackUseMem). While saving, the clip's inputs and index
-// are built at the start, over the staging, the capture buffers and the
-// compressed frame (all empty then: see flashbackSaveClipFile). A long clip's
-// can need more room than those have: then the codes' tables start after that
-// room.
+// (flashbackHuffman) and what those codes are built from (each screen's), then
+// the audio staging, then the inputs' ring (flashback_input.c), then what's
+// known about each ring slot (flashbackUseMem). While saving, the clip's inputs
+// and index are built at the start, over the staging, the capture buffers and
+// the compressed frame (see flashbackSaveClipFile). A long clip's can need more
+// room than those have: then the codes' tables start after that room.
+//
+// Which screen comes first is settled here too (g_priority, with both
+// recorded), and so the sizes of the first screen's frames and the second's.
 void flashbackLayout(void)
 {
+    g_priBottom = g_botBytes != 0 && g_priority == FLASHBACK_PRIORITY_BOTTOM;
+    g_priW = g_priBottom ? g_botW : g_w;
+    g_priH = g_priBottom ? g_botH : g_h;
+    g_priBytes = g_priBottom ? g_botBytes : g_slotBytes;
+    g_secW = g_priBottom ? g_w : g_botW;
+    g_secH = g_priBottom ? g_h : g_botH;
+    g_secBytes = g_botBytes == 0 ? 0 : g_priBottom ? g_slotBytes : g_botBytes;
+
     g_stageBytes = g_stageSlots * g_slotStride;
     g_frameOffset = (g_stageBytes + 0xFFF) & ~0xFFF;
-    g_capStride = (g_slotBytes + g_h * 2 + 0xFFF) & ~0xFFF;
-    g_packedOffset = g_frameOffset + g_capBufs * g_capStride;
+    g_capStride = (g_priBytes + g_priH * 2 + 0xFFF) & ~0xFFF;
+    g_secOffset = g_frameOffset + g_capBufs * g_capStride;
+    g_secStride = g_secBytes != 0 ? (g_secBytes + g_secH * 2 + 0xFFF) & ~0xFFF : 0;
+    g_packedOffset = g_secOffset + g_capBufs * g_secStride;
     g_memSize = g_packedOffset + (isN3DS ? (g_slotBytes + 0xFFF) & ~0xFFF : 0);
     u32 tailBytes = (flashbackClipTailMax(g_frames) + 0xFFF) & ~0xFFF;
     if (g_memSize < tailBytes)
         g_memSize = tailBytes;
     g_huffOffset = g_memSize;
     if (isN3DS)
-        g_memSize += (sizeof(FlashbackHuffman) + 0xFFF) & ~0xFFF;
+        g_memSize += (2 * sizeof(FlashbackHuffman) + 0xFFF) & ~0xFFF;
     g_audioStageOffset = g_memSize;
     if (g_audio)
         g_memSize += (g_audioStageFrames * FLASHBACK_AUDIO_FRAME_BYTES + 0xFFF) & ~0xFFF;
     g_inputOffset = g_memSize;
     g_memSize += (g_frames * sizeof(FlashbackInput) + 0xFFF) & ~0xFFF;
     g_slotInfoOffset = g_memSize;
-    g_memSize += (g_frames * (2 * sizeof(u32) + sizeof(u16)) + 0xFFF) & ~0xFFF;
+    g_memSize += (g_ringSlots * (3 * sizeof(u32) + 2 * sizeof(u16) + sizeof(u8)) + 0xFFF) & ~0xFFF;
 }
 
 // Starts using 'mem' (g_memSize bytes, laid out by flashbackLayout) as the
-// recorder's memory: g_slotLen, g_slotAudioFrame and g_repeat, g_frames of
-// each, are at its end. The Huffman codes (a New 3DS's) start from no counts
-// (see flashbackHuffman).
+// recorder's memory: what's known about the ring's slots (g_slotLen and the
+// rest, g_ringSlots of each) is at its end. The Huffman codes (a New 3DS's)
+// start from no counts (see flashbackHuffman).
 void flashbackUseMem(u8 *mem)
 {
     g_mem = mem;
     g_slotLen = (u32 *)(mem + g_slotInfoOffset);
-    g_slotAudioFrame = g_slotLen + g_frames;
-    g_repeat = (u16 *)(g_slotAudioFrame + g_frames);
+    g_slotBotLen = g_slotLen + g_ringSlots;
+    g_slotAudioFrame = g_slotBotLen + g_ringSlots;
+    g_repeat = (u16 *)(g_slotAudioFrame + g_ringSlots);
+    g_missed = g_repeat + g_ringSlots;
+    g_slotFlags = (u8 *)(g_missed + g_ringSlots);
     g_huff = isN3DS ? (FlashbackHuffman *)(mem + g_huffOffset) : NULL;
     if (g_huff != NULL)
-        memset(g_huff->counts, 0, sizeof(g_huff->counts));
+    {
+        memset(g_huff[0].counts, 0, sizeof(g_huff[0].counts));
+        memset(g_huff[1].counts, 0, sizeof(g_huff[1].counts));
+    }
 }
 
 // Every frame is written starting on a boundary of the card's internal blocks:
@@ -178,9 +207,23 @@ u32 flashbackVideoOffset(u32 audioBytes)
     return (audioBytes + 0xFFFF) & ~0xFFFF;
 }
 
-static void flashbackApplyFormat(u32 res, u32 fpsIdx, u32 seconds, bool audio)
+// How many slots the ring has for clips of 'frames' frames: one for each
+// frame, and the ones a clip starts with before its first (see
+// FLASHBACK_KEY_SLOTS). With the bottom screen recorded, also the slots its
+// whole frames can take for themselves: one for every FLASHBACK_KEY_SLOTS
+// slots (so one for every FLASHBACK_KEY_SLOTS - 1 of the others), and a few to
+// spare. That's 3.5% more: 10 minutes at full resolution still stay under the
+// 4 GB a file on the SD card can be.
+u32 flashbackRingSlots(u32 frames, bool bottom)
+{
+    return frames + (bottom ? FLASHBACK_LEAD_MAX + frames / (FLASHBACK_KEY_SLOTS - 1) + 4 : FLASHBACK_KEY_SLOTS);
+}
+
+static void flashbackApplyFormat(u32 res, u32 screens, u32 priority, u32 fpsIdx, u32 seconds, bool audio)
 {
     g_res = res;
+    g_screens = screens;
+    g_priority = screens == FLASHBACK_SCREENS_BOTH ? priority : FLASHBACK_PRIORITY_TOP;
     g_fpsIdx = fpsIdx;
     g_seconds = seconds;
 
@@ -191,6 +234,15 @@ static void flashbackApplyFormat(u32 res, u32 fpsIdx, u32 seconds, bool audio)
 
     g_slotBytes = g_w * g_h * 2;
     g_slotStride = flashbackSlotStride(g_slotBytes);
+
+    // The bottom screen, at the same scale. The two screens' frames share a
+    // slot (see flashbackPackFrame), a slot being the top screen's frame as it
+    // is, the bigger of the two: so the ring is hardly bigger with both.
+    bool bottom = screens == FLASHBACK_SCREENS_BOTH;
+    g_ringSlots = flashbackRingSlots(g_frames, bottom);
+    g_botW = !bottom ? 0 : res == FLASHBACK_RES_FULL ? 320 : 160;
+    g_botH = !bottom ? 0 : g_h;
+    g_botBytes = g_botW * g_botH * 2;
 
     // Audio: a ring at the start of the ring file (a whole number of chunks of
     // whole SD sectors), the video slots after it, and staging memory.
@@ -350,7 +402,7 @@ static void flashbackThreadMain(void)
     bool sdMode = flashbackIsSdMode();
     if (sdMode)
         flashbackLoadSettings();
-    flashbackApplyFormat(g_wantRes, g_wantFpsIdx, g_wantSeconds, flashbackAudioWanted());
+    flashbackApplyFormat(g_wantRes, g_wantScreens, flashbackPriorityWanted(), g_wantFpsIdx, g_wantSeconds, flashbackAudioWanted());
 
     u64 period = SYSCLOCK_ARM11 / g_fps;
     u64 nextTick = svcGetSystemTick();
@@ -392,11 +444,11 @@ static void flashbackThreadMain(void)
 
         // Settings changed in the menu: the ring layout depends on them, so
         // drop the buffer and restart with the new format.
-        if (g_wantRes != g_res || g_wantFpsIdx != g_fpsIdx || g_wantSeconds != g_seconds ||
-            flashbackAudioWanted() != g_audio)
+        if (g_wantRes != g_res || g_wantScreens != g_screens || flashbackPriorityWanted() != g_priority ||
+            g_wantFpsIdx != g_fpsIdx || g_wantSeconds != g_seconds || flashbackAudioWanted() != g_audio)
         {
             flashbackStop();
-            flashbackApplyFormat(g_wantRes, g_wantFpsIdx, g_wantSeconds, flashbackAudioWanted());
+            flashbackApplyFormat(g_wantRes, g_wantScreens, flashbackPriorityWanted(), g_wantFpsIdx, g_wantSeconds, flashbackAudioWanted());
             period = SYSCLOCK_ARM11 / g_fps;
             nextTick = svcGetSystemTick();
             wasRecording = false;

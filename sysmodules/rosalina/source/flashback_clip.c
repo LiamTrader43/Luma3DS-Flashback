@@ -36,29 +36,92 @@
 // Export
 // ---------------------------------------------------------------------------
 
+// A slot with the top screen's frame whole: a reader can make out the top
+// screen from there on...
+static inline bool flashbackSlotHasTopWhole(u32 idx)
+{
+    return g_slotLen[idx] != 0 && !(g_slotFlags[idx] & FLASHBACK_FRAME_TOP_DELTA);
+}
+
+// ...and likewise for the bottom screen's.
+static inline bool flashbackSlotHasBottomWhole(u32 idx)
+{
+    return g_slotBotLen[idx] != 0 && !(g_slotFlags[idx] & FLASHBACK_FRAME_BOTTOM_DELTA);
+}
+
+// How many grid slots a slot is shown for: its own and its repeats, or none
+// (it's only read: the second screen's whole frame in a slot of its own).
+static inline u32 flashbackSlotShownFor(u32 idx)
+{
+    return g_slotFlags[idx] & FLASHBACK_FRAME_UNSHOWN ? 0 : 1 + g_repeat[idx];
+}
+
+// Of a slot's 'copies' (how many grid slots it's shown for in a clip), the ones
+// that were missed captures: all the slot's, short of its own frame.
+static inline u32 flashbackMissedOf(u32 idx, u32 copies)
+{
+    return copies == 0 ? 0 : g_missed[idx] < copies ? g_missed[idx] : copies - 1;
+}
+
 FlashbackClipPlan flashbackPlanClip(void)
 {
-    FlashbackClipPlan plan = { 0, 0, 0 };
+    FlashbackClipPlan plan = { 0, 0, 0, 0, 0 };
     u32 frameTimes = 0;
 
     // Walk back from the newest slot until the slots (with their repeats)
-    // cover the clip length; the oldest one may be partly cut.
+    // cover the clip length; the oldest one may be partly cut. (It's one
+    // that's shown, then: one that isn't only ends up oldest when the ring has
+    // no more.)
     while (plan.slots < g_count && frameTimes < g_frames)
     {
-        u32 idx = (g_head + g_frames - 1 - plan.slots) % g_frames;
-        frameTimes += 1 + g_repeat[idx];
+        u32 idx = (g_head + g_ringSlots - 1 - plan.slots) % g_ringSlots;
+        frameTimes += flashbackSlotShownFor(idx);
         plan.slots++;
     }
 
     plan.trimFirst = frameTimes > g_frames ? frameTimes - g_frames : 0;
     plan.frames = frameTimes - plan.trimFirst;
+
+    // Then back to the slot a reader has to start from: the oldest one's frames
+    // may be what changed since the ones before, and so on back to whole ones.
+    // So back to the nearest slot with the top screen's frame whole, or the
+    // nearest with the bottom screen's, whichever is further: both are stored
+    // whole every FLASHBACK_KEY_SLOTS slots, give or take the few the second
+    // screen's can come late (the ring has more slots than a clip has frames
+    // for these). With none of a screen's that near (the second screen wasn't
+    // captured for a while), it has no picture until its next whole frame.
+    // (While a screen changes altogether at every frame, every slot has it
+    // whole.)
+    u32 topKey = UINT32_MAX, botKey = g_botBytes != 0 ? UINT32_MAX : 0;
+    for (u32 lead = 0; plan.slots != 0 && lead < FLASHBACK_LEAD_MAX && plan.slots + lead <= g_count &&
+                       (topKey == UINT32_MAX || botKey == UINT32_MAX); lead++)
+    {
+        u32 idx = (g_head + g_ringSlots - plan.slots - lead) % g_ringSlots;
+        if (topKey == UINT32_MAX && flashbackSlotHasTopWhole(idx))
+            topKey = lead;
+        if (botKey == UINT32_MAX && flashbackSlotHasBottomWhole(idx))
+            botKey = lead;
+    }
+    if (topKey != UINT32_MAX)
+        plan.lead = topKey;
+    if (botKey != UINT32_MAX && botKey > plan.lead)
+        plan.lead = botKey;
+
+    for (u32 i = 0; i < plan.slots; i++)
+    {
+        u32 idx = (g_head + g_ringSlots - plan.slots + i) % g_ringSlots;
+        plan.missed += flashbackMissedOf(idx, flashbackSlotShownFor(idx) - (i == 0 ? plan.trimFirst : 0));
+    }
     return plan;
 }
 
+// The ring slot of the plan's i-th slot (the lead slots first), and how many
+// grid slots it's shown for (0 for a lead slot, and for one that's never
+// shown: they're only read).
 static inline u32 flashbackPlanSlot(const FlashbackClipPlan *plan, u32 i, u32 *copies)
 {
-    u32 idx = (g_head + g_frames - plan->slots + i) % g_frames;
-    *copies = 1 + g_repeat[idx] - (i == 0 ? plan->trimFirst : 0);
+    u32 idx = (g_head + g_ringSlots - plan->slots - plan->lead + i) % g_ringSlots;
+    *copies = i < plan->lead ? 0 : flashbackSlotShownFor(idx) - (i == plan->lead ? plan->trimFirst : 0);
     return idx;
 }
 
@@ -95,6 +158,11 @@ static u32 flashbackAudioSampleOf(u32 frame)
 // the 3DS, and on Windows exports it as a video. Keep
 // those readers in step with any change here.
 //
+// What follows is the layout from before clips had FLASHBACK_CLIP_SCREENS in
+// their version, which every clip saved now has: see "With
+// FLASHBACK_CLIP_SCREENS" below for what that changes (the index entries, and
+// what a slot holds). The rest still stands.
+//
 // Version 1, recorded without audio:
 //   [ring slots]    slot i at offset i * slotStride: a compressed frame (packed
 //                   with Huffman codes if it starts with 0xFF), or the raw
@@ -129,11 +197,37 @@ static u32 flashbackAudioSampleOf(u32 frame)
 // FLASHBACK_CLIP_HUFFMAN in the version: frames may be packed with Huffman
 // codes (see flashbackHuffman). Readers from before that turn such a clip down
 // as made by a newer Flashback, rather than showing it wrong.
+//
+// With FLASHBACK_CLIP_SCREENS in the version (likewise):
+//   - An index entry is { u32 offset, u32 topSize, u32 bottomSize, u32 copies,
+//     u32 audioPos, u32 flags }, with or without audio (audioPos 0 without):
+//     what's new at one moment. The top screen's frame is at 'offset',
+//     topSize bytes (0: it's as it was), and the bottom screen's on the next
+//     multiple of 4 after it, bottomSize bytes (0: as it was, or the clip has
+//     no bottom screen). The entry is shown for 'copies' frames; the low bits
+//     of 'flags' say how the frames are stored (FLASHBACK_FRAME_*: as what
+//     changed since the frame before on that screen, and packed with Huffman
+//     codes, which a frame's first byte no longer tells), and its high 16 how
+//     many of the copies were missed captures (the rest of the extra ones:
+//     nothing had changed).
+//   - An entry can have 0 copies: it's only read, for what it leaves on the
+//     screens, which the entries after it may be stored as changes to. The
+//     first entries are such (the ones before the first one shown, from the
+//     nearest with each screen's frame whole), and so is the second screen's
+//     whole frame (the bottom screen's, or the top screen's when the bottom
+//     one comes first: see FlashbackPriority) where it has a slot of its own:
+//     the entry before the one with the other screen's frame of the same
+//     moment. A screen without a whole frame yet has no picture.
+//   - The trailer's last word is the bottom screen's frames' width | height
+//     << 16 (0: none); its width and height are the top screen's.
+//   - The ring has more slots than the clip has frames (flashbackRingSlots).
 
 #define FLASHBACK_CLIP_MAGIC            0x4B424C46  // "FLBK"
 #define FLASHBACK_CLIP_VERSION          1
 #define FLASHBACK_CLIP_VERSION_AUDIO    3
 #define FLASHBACK_CLIP_HUFFMAN          0x100
+#define FLASHBACK_CLIP_SCREENS          0x200
+#define FLASHBACK_CLIP_ENTRY_SIZE       24
 
 typedef struct FlashbackClipTrailer {
     u32 magic;
@@ -145,7 +239,7 @@ typedef struct FlashbackClipTrailer {
     u32 frameCount;     // frames in the clip, copies included
     u32 indexOffset;    // where the index starts
     u32 inputOffset;    // where the inputs start (0: none)
-    u32 reserved;
+    u32 bottomSize;     // the bottom screen's frames: width | height << 16 (0: not recorded)
 } FlashbackClipTrailer;
 _Static_assert(sizeof(FlashbackClipTrailer) == 48, "the clip trailer is 48 bytes");
 
@@ -191,24 +285,18 @@ static u32 flashbackBuildClipInputs(const FlashbackClipPlan *plan, u8 *buf)
 static u32 flashbackBuildClipIndex(const FlashbackClipPlan *plan, u32 indexOffset, u32 inputOffset, u8 *buf)
 {
     u32 *entry = (u32 *)buf;
-    for (u32 i = 0; i < plan->slots; i++)
+    for (u32 i = 0; i < plan->lead + plan->slots; i++)
     {
         u32 copies;
         u32 idx = flashbackPlanSlot(plan, i, &copies);
-        if (g_audio)
-        {
-            *entry++ = g_videoOffset + idx * g_slotStride;
-            *entry++ = g_slotLen[idx];
-            *entry++ = copies;
-            // (The oldest entry may start a few copies in: see flashbackPlanClip.)
-            *entry++ = flashbackAudioSampleOf(g_slotAudioFrame[idx]) + flashbackAudioSamplesFor(i == 0 ? plan->trimFirst : 0);
-        }
-        else
-        {
-            *entry++ = idx;
-            *entry++ = g_slotLen[idx];
-            *entry++ = copies;
-        }
+        *entry++ = g_videoOffset + idx * g_slotStride;
+        *entry++ = g_slotLen[idx];
+        *entry++ = g_slotBotLen[idx];
+        *entry++ = copies;
+        // (The oldest entry shown may start a few copies in: see flashbackPlanClip.)
+        *entry++ = !g_audio || copies == 0 ? 0 : flashbackAudioSampleOf(g_slotAudioFrame[idx]) +
+                                                 flashbackAudioSamplesFor(i == plan->lead ? plan->trimFirst : 0);
+        *entry++ = (g_slotFlags[idx] & FLASHBACK_FRAME_STORED) | flashbackMissedOf(idx, copies) << 16;
     }
 
     if (g_audio)
@@ -230,16 +318,18 @@ static u32 flashbackBuildClipIndex(const FlashbackClipPlan *plan, u32 indexOffse
     FlashbackClipTrailer *t = (FlashbackClipTrailer *)entry;
     memset(t, 0, sizeof(*t));
     t->magic = FLASHBACK_CLIP_MAGIC;
-    t->version = (g_audio ? FLASHBACK_CLIP_VERSION_AUDIO : FLASHBACK_CLIP_VERSION) | FLASHBACK_CLIP_HUFFMAN;
+    t->version = (g_audio ? FLASHBACK_CLIP_VERSION_AUDIO : FLASHBACK_CLIP_VERSION) | FLASHBACK_CLIP_HUFFMAN |
+                 FLASHBACK_CLIP_SCREENS;
     t->width = g_w;
     t->height = g_h;
     t->fps = g_fps;
     t->slotStride = g_slotStride;
     t->slotBytes = g_slotBytes;
-    t->entryCount = plan->slots;
+    t->entryCount = plan->lead + plan->slots;
     t->frameCount = plan->frames;
     t->indexOffset = indexOffset;
     t->inputOffset = inputOffset;
+    t->bottomSize = g_botW | g_botH << 16;
     return (u32)((u8 *)(t + 1) - buf);
 }
 
@@ -248,7 +338,9 @@ static u32 flashbackBuildClipIndex(const FlashbackClipPlan *plan, u32 indexOffse
 // that much of free while saving.
 u32 flashbackClipTailMax(u32 frames)
 {
-    return sizeof(FlashbackClipInputs) + frames * (sizeof(FlashbackInput) + 16) +   // (16: an index entry, with audio)
+    // (An index entry for every slot of the ring, at most.)
+    return sizeof(FlashbackClipInputs) + frames * sizeof(FlashbackInput) +
+           flashbackRingSlots(frames, g_botBytes != 0) * FLASHBACK_CLIP_ENTRY_SIZE +
            sizeof(FlashbackClipAudioInfo) + sizeof(FlashbackClipTrailer);
 }
 
@@ -263,10 +355,11 @@ static s32 flashbackSaveClipFile(FS_Archive archive, const char *clip, const Fla
 
     // The ring always starts at slot 0, so until it has wrapped once the clip
     // only uses its first g_count slots: the rest can be trimmed off.
-    u32 dataEnd = g_videoOffset + (g_count < g_frames ? g_count : g_frames) * g_slotStride;
-    u8 *tail = g_mem;                   // staging and the capture buffers: empty while saving (see flashbackLayout)
+    u32 dataEnd = g_videoOffset + (g_count < g_ringSlots ? g_count : g_ringSlots) * g_slotStride;
+    u8 *tail = g_mem;                   // staging and the capture buffers: not in use while saving (see flashbackLayout)
     u32 inputSize = flashbackBuildClipInputs(plan, tail);
     u32 tailSize = inputSize + flashbackBuildClipIndex(plan, dataEnd + inputSize, dataEnd, tail + inputSize);
+    flashbackForgetFrames();            // (that's over the frame before, which the next frame would be compared with)
 
     IFile_Close(&g_ring);
     if (R_FAILED(FSUSER_RenameFile(archive, fsMakePath(PATH_ASCII, FLASHBACK_RING_FILE),
@@ -297,9 +390,7 @@ static s32 flashbackSaveClipFile(FS_Archive archive, const char *clip, const Fla
     }
 
     // The old buffer is now the clip: continue with an empty one.
-    g_head = 0;
-    g_count = 0;
-    memset(g_repeat, 0, g_frames * sizeof(*g_repeat));
+    flashbackNewRing();
     flashbackAudioReset();
     flashbackInputReset();
     if (R_FAILED(flashbackOpenRing(archive)))

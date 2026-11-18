@@ -16,9 +16,10 @@ FILES = [os.path.join(SOURCE, '..', 'include', 'flashback_internal.h')] + \
 FUNCTIONS = {
     # flashback.c
     'flashbackAudioFramesFor', 'flashbackLayout', 'flashbackUseMem', 'flashbackSlotStride', 'flashbackVideoOffset',
-    'flashbackApplyFormat',
+    'flashbackRingSlots', 'flashbackApplyFormat',
     # flashback_compress.c (frames in the tests are compressed for real)
     'flashbackPackHash', 'flashbackUprightBand', 'flashbackPackPixels', 'flashbackCompress',
+    'flashbackSameShare', 'flashbackPutSkip', 'flashbackCompressDelta',
     'flashbackHuffLengths', 'flashbackHuffCodes', 'flashbackHuffman', 'flashbackColumnsToRows',
     # flashback_audio.c
     'flashbackAudioSetCapture', 'flashbackAudioPause', 'flashbackAudioReset', 'flashbackAudioFramesIn',
@@ -29,10 +30,14 @@ FUNCTIONS = {
     'flashbackInputPoll', 'flashbackInputSample', 'flashbackInputLatest', 'flashbackInputSleepUntil',
     # flashback_record.c
     'flashbackWriteAudio', 'flashbackWritePending', 'flashbackWriterThreadMain', 'flashbackDrainWrites',
-    'flashbackDrainCaptures', 'flashbackPackFrame', 'flashbackCaptureFrame', 'flashbackPackThreadMain',
-    'flashbackFillMissed',
+    'flashbackDrainCaptures', 'flashbackStageSlot', 'flashbackPackFrame', 'flashbackCaptureFrame', 'flashbackPackThreadMain',
+    'flashbackFillMissed', 'flashbackPackScreen', 'flashbackForgetFrames', 'flashbackNewRing', 'flashbackCaptureQueue',
+    'flashbackFallingBehind',
     # flashback_clip.c
-    'flashbackPlanClip', 'flashbackPlanSlot', 'flashbackAudioOldest', 'flashbackAudioBase',
+    'flashbackPlanClip', 'flashbackPlanSlot', 'flashbackSlotHasTopWhole', 'flashbackSlotHasBottomWhole',
+    'flashbackSlotShownFor', 'flashbackMissedOf',
+    'flashbackAudioOldest',
+    'flashbackAudioBase',
     'flashbackAudioSampleOf', 'flashbackBuildClipInputs', 'flashbackBuildClipIndex', 'flashbackClipTailMax',
 }
 

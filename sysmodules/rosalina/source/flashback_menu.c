@@ -44,7 +44,11 @@
 // Version 2 added the clip length, as an index into the 5 to 30 second list of
 // that time; version 3 stores it in seconds, so the list can change; version 4
 // added audio; version 5 moved the length to 16 bits, for lengths over 255
-// seconds. Older files still load.
+// seconds. Older files still load. (Which screens are recorded, and which
+// comes first, went into bytes that version 5 always had 0 in, the top screen
+// only and the top screen first: no new version, so a build from before them
+// still loads these files. Audio is always recorded now: the byte that said so
+// is always 1, for such a build.)
 #define FLASHBACK_SETTINGS_VERSION  5
 
 typedef struct FlashbackSettings {
@@ -54,13 +58,13 @@ typedef struct FlashbackSettings {
     u8  enabled;        // unused (always 0): recording is always off at boot
     u8  res;            // FlashbackResolution
     u8  fpsIdx;         // index into g_fpsChoices
-    u8  format;         // unused (always 0): was the save format, when BMP frames were one
+    u8  screens;        // FlashbackScreens (version 5; before: the save format, when BMP frames were one)
     u32 saveCombo;
     // Version 2 and later:
-    u8  length;         // versions 3 and 4: clip length in seconds (version 2: index into
-                        // { 5, 10, ..., 30 }; version 5: unused, always 0)
+    u8  priority;       // version 5: FlashbackPriority (versions 3 and 4: clip length in seconds;
+                        // version 2: index into { 5, 10, ..., 30 })
     // Version 4 and later:
-    u8  audio;          // record audio: 1 or 0
+    u8  audio;          // always 1 (it was a setting: record audio, 1 or 0)
     // Version 5 and later (was unused):
     u16 seconds;        // clip length in seconds
 } FlashbackSettings;
@@ -78,9 +82,11 @@ static FlashbackSettings flashbackCurrentSettings(void)
     s.size = sizeof(s);
     s.enabled = 0;      // not remembered, so toggling recording doesn't rewrite the file
     s.res = (u8)g_wantRes;
+    s.screens = (u8)g_wantScreens;
     s.fpsIdx = (u8)g_wantFpsIdx;
     s.saveCombo = g_saveCombo;
-    s.audio = g_wantAudio ? 1 : 0;
+    s.priority = (u8)g_wantPriority;
+    s.audio = 1;
     s.seconds = (u16)g_wantSeconds;
     return s;
 }
@@ -108,10 +114,10 @@ void flashbackLoadSettings(void)
     u32 seconds = 0;
     if (total >= sizeof(s))
     {
-        if (s.version == 2 && s.length < 6)
-            seconds = (s.length + 1) * 5;       // 5..30 s
+        if (s.version == 2 && s.priority < 6)
+            seconds = (s.priority + 1) * 5;     // 5..30 s (the byte was the length then)
         else if (s.version == 3 || s.version == 4)
-            seconds = s.length;
+            seconds = s.priority;
         else if (s.version >= 5)
             seconds = s.seconds;
     }
@@ -119,10 +125,12 @@ void flashbackLoadSettings(void)
         g_wantSeconds = seconds;
     if (s.res < FLASHBACK_RES_COUNT)
         g_wantRes = s.res;
+    if (s.version >= 5 && s.screens < FLASHBACK_SCREENS_COUNT)
+        g_wantScreens = s.screens;
     if (s.fpsIdx < FLASHBACK_FPS_CHOICES)
         g_wantFpsIdx = s.fpsIdx;
-    if (s.version >= 4 && total >= sizeof(s))
-        g_wantAudio = s.audio != 0;     // (older files: the default, on)
+    if (s.version >= 5 && total >= sizeof(s) && s.priority < FLASHBACK_PRIORITY_COUNT)
+        g_wantPriority = s.priority;
     // Re-checked in case the Rosalina menu combo was changed since.
     if (flashbackCheckCombo(s.saveCombo) == NULL)
         g_saveCombo = s.saveCombo;
@@ -243,8 +251,10 @@ static void flashbackClipSizeText(char *out, u32 seconds)
 {
     u32 frameBytes = (g_wantRes == FLASHBACK_RES_FULL ? 400 * 240 : 200 * 120) * 2;
     u32 audioBytes = flashbackAudioWanted() ? flashbackAudioFramesFor(seconds) * FLASHBACK_AUDIO_FRAME_BYTES : 0;
+    // (The ring has more slots than the clip has frames: flashbackRingSlots.)
     u64 clipBytes = flashbackVideoOffset(audioBytes) +
-                    (u64)seconds * g_fpsChoices[g_wantFpsIdx] * flashbackSlotStride(frameBytes);
+                    (u64)flashbackRingSlots(seconds * g_fpsChoices[g_wantFpsIdx], g_wantScreens == FLASHBACK_SCREENS_BOTH) *
+                    flashbackSlotStride(frameBytes);
     u32 clipTenthsMb = (u32)((clipBytes + 50000) / 100000);     // in tenths of a MB (1 MB = 1,000,000 bytes)
 
     if (clipTenthsMb < 100)
@@ -343,11 +353,13 @@ void FlashbackMenu_Show(void)
     {
         // What the settings will be once applied (they apply within one frame).
         u32 res = g_wantRes;
+        u32 screens = g_wantScreens;
         u32 fps = g_fpsChoices[g_wantFpsIdx];
         u32 seconds = g_wantSeconds;
         u32 frames = seconds * fps;
         bool audio = flashbackAudioWanted();
-        bool applied = res == g_res && g_wantFpsIdx == g_fpsIdx && seconds == g_seconds && audio == g_audio;
+        bool applied = res == g_res && screens == g_screens && flashbackPriorityWanted() == g_priority &&
+                       g_wantFpsIdx == g_fpsIdx && seconds == g_seconds && audio == g_audio;
 
         Draw_Lock();
         g_screenBlankFrom = 0;
@@ -360,28 +372,35 @@ void FlashbackMenu_Show(void)
             posY = flashbackDrawLines(posY, COLOR_RED, "Only available when booting from the SD card.\n\n");
 
         posY = flashbackDrawLines(posY, COLOR_WHITE, "Recording:  %s\n", g_enabled ? "on" : "off");
-        posY = flashbackDrawLines(posY, COLOR_WHITE, "Resolution: %s\n",
-                                  res == FLASHBACK_RES_FULL ? "full (400x240)" : "half (200x120)");
+        posY = flashbackDrawLines(posY, COLOR_WHITE, "Resolution: %s  Screens: %s\n",
+                                  res == FLASHBACK_RES_FULL ? "full (400x240)" : "half (200x120)",
+                                  screens == FLASHBACK_SCREENS_BOTH ? "both" : "top");
         // (With the size of a saved clip of the full length.)
         flashbackClipSizeText(clipSize, seconds);
         posY = flashbackDrawLines(posY, COLOR_WHITE, "Frame rate: %lu fps   Length: %lu s (%s)\n",
                                   fps, seconds, clipSize);
-        posY = flashbackDrawLines(posY, COLOR_WHITE, "Audio:      %s\n\n",
-                                  !g_audioRunning ? "failed" : g_wantAudio ? "on" : "off");
+        // (Which screen comes first when there isn't the time or the room for both: see FlashbackPriority.)
+        posY = flashbackDrawLines(posY, COLOR_WHITE, "Priority:   %s\n\n",
+                                  screens != FLASHBACK_SCREENS_BOTH ? "top screen (the only one recorded)" :
+                                  g_wantPriority == FLASHBACK_PRIORITY_BOTTOM ? "bottom screen" : "top screen");
 
         // Counted the same way a save would be: frame times in the clip, and
-        // how many of those are dropped frames filled with a copy.
+        // how many of those are dropped frames filled with a copy (not the ones
+        // where the screens hadn't changed, which aren't stored either).
         u32 buffered = 0, dropped = 0;
         if (applied && g_active)
         {
             FlashbackClipPlan plan = flashbackPlanClip();
             buffered = plan.frames;
-            dropped = plan.frames - plan.slots;
+            dropped = plan.missed;
         }
 
         posY = flashbackDrawLines(posY, COLOR_WHITE, "Buffered:  %lu / %lu frames, %lu dropped\n",
                                   buffered, frames, dropped);
-        if (applied && g_active && g_audio)
+        if (!g_audioRunning)
+            posY = flashbackDrawLines(posY, COLOR_WHITE, "Rate:      %lu.%lu / %lu fps   audio: failed\n",
+                                      g_statFpsX10 / 10, g_statFpsX10 % 10, fps);
+        else if (applied && g_active && g_audio)
             posY = flashbackDrawLines(posY, COLOR_WHITE, "Rate:      %lu.%lu / %lu fps   audio: %lu missed\n",
                                       g_statFpsX10 / 10, g_statFpsX10 % 10, fps, g_audioMissed);
         else
@@ -409,8 +428,8 @@ void FlashbackMenu_Show(void)
         posY += 10;
         posY = flashbackDrawLines(posY, COLOR_WHITE, "A: recording on/off   X: save clip now   B: back\n");
         posY = flashbackDrawLines(posY, COLOR_WHITE, "Y: resolution   Left/Right: fps   L/R: length\n");
-        posY = flashbackDrawLines(posY, COLOR_WHITE, "Start: audio   Select: hotkey\n");
-        posY = flashbackDrawLines(posY, COLOR_WHITE, "Off or res/fps/length/audio clear the buffer.\n\n");
+        posY = flashbackDrawLines(posY, COLOR_WHITE, "Start: priority   Select: hotkey   Up: screens\n");
+        posY = flashbackDrawLines(posY, COLOR_WHITE, "Off or changing a setting above clears the buffer.\n\n");
         LumaConfig_ConvertComboToString(comboStr, g_saveCombo);
         flashbackDrawLines(posY, COLOR_WHITE, "In game: %s saves a clip.", comboStr);
         flashbackBlankRows(g_screenBlankFrom, SCREEN_BOT_HEIGHT);
@@ -433,14 +452,16 @@ void FlashbackMenu_Show(void)
         }
         else if ((pressed & KEY_Y) && !busy)
             g_wantRes = (g_wantRes + 1) % FLASHBACK_RES_COUNT;
+        else if ((pressed & (KEY_DUP | KEY_DDOWN)) && !busy)
+            g_wantScreens = (g_wantScreens + 1) % FLASHBACK_SCREENS_COUNT;
         else if ((pressed & KEY_DRIGHT) && !busy)
             g_wantFpsIdx = (g_wantFpsIdx + 1) % FLASHBACK_FPS_CHOICES;
         else if ((pressed & KEY_DLEFT) && !busy)
             g_wantFpsIdx = (g_wantFpsIdx + FLASHBACK_FPS_CHOICES - 1) % FLASHBACK_FPS_CHOICES;
         else if ((pressed & (KEY_L | KEY_R)) && !busy)
             FlashbackMenu_ChangeLength();
-        else if ((pressed & KEY_START) && !busy && g_audioRunning)
-            g_wantAudio = !g_wantAudio;
+        else if ((pressed & KEY_START) && !busy && g_wantScreens == FLASHBACK_SCREENS_BOTH)
+            g_wantPriority = (g_wantPriority + 1) % FLASHBACK_PRIORITY_COUNT;
         else if (pressed & KEY_SELECT)
             FlashbackMenu_ChangeHotkey();
         else if (pressed & KEY_B)

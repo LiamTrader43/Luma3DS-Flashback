@@ -69,4 +69,4 @@ static void Draw_Unlock(void) {}
 static bool isN3DS = true;
 
 static void flashbackCaptureWait(void) {}
-static bool flashbackCapture(u16 *dst);
+static bool flashbackCapture(u16 *top, u16 *bottom, bool *bottomOk);

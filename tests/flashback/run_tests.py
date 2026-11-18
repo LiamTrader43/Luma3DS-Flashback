@@ -84,7 +84,7 @@ def main():
     if built:
         step('fuzz test', lambda: compile_c(args.cc, 'fuzz', [os.path.join(HERE, 'fuzz.c'), os.path.join(HERE, 'decode.c')], inc)
              and run([os.path.join(BUILD, 'fuzz' + EXE)], cwd=BUILD)[0])
-        step('Huffman test', lambda: compile_c(args.cc, 'huffman', [os.path.join(HERE, 'huffman.c'),
+        step('compression test', lambda: compile_c(args.cc, 'huffman', [os.path.join(HERE, 'huffman.c'),
                                                                  os.path.join(HERE, 'decode.c')], inc)
              and run([os.path.join(BUILD, 'huffman' + EXE)], cwd=BUILD)[0])
         if args.skip_e2e:
@@ -92,7 +92,8 @@ def main():
         elif platform.system() != 'Windows':
             print('\n(end-to-end test left out: it needs Windows)')
         else:
-            step('end-to-end test', lambda: compile_c(args.cc, 'e2e', [os.path.join(HERE, 'e2e.c')], inc, ['-lwinmm'])
+            step('end-to-end test', lambda: compile_c(args.cc, 'e2e', [os.path.join(HERE, 'e2e.c'),
+                                                                     os.path.join(HERE, 'decode.c')], inc, ['-lwinmm'])
                  and run([os.path.join(BUILD, 'e2e' + EXE)], cwd=BUILD)[0])
         step('screen redraw test', lambda: compile_c(args.cc, 'screentest', [os.path.join(HERE, 'screentest.c')],
                                                      inc + ['-Wno-unused-function'])

@@ -72,6 +72,20 @@
 // A frame that wouldn't come out smaller this way is stored as its ops.
 // (Flashback-Studio's tests/codes_test.c makes frames with a copy of this
 // compression: keep it in step.)
+//
+// A frame can also be stored as what changed since the frame before it on the
+// same screen (flashbackCompressDelta): the same ops, and one more,
+//   11111111 n                SKIP  the next n + 1 pixels (n up to 254) stay
+//                                   as they were in the frame before
+//   11111111 11111111 lo hi         ...or the next (lo | hi << 8) + 1 do
+// with the pixels in the screen's own order instead of upright: column by
+// column, left to right, each from the bottom row up (so this frame and the one
+// before it are both read straight through memory: an Old 3DS's cache can't
+// hold a row's worth of both). After a SKIP, the previous pixel is the last one
+// skipped; the table is left alone. Such a frame can be packed with Huffman
+// codes too (SKIP's count bytes are "bytes after ops"), and may then start with
+// 0xFF without them: a clip's index says how each of its frames is stored (see
+// flashback_clip.c).
 
 // Rows of a frame stored as it is turned upright at a time (see
 // flashbackUprightBand): a cache line holds 16 pixels of a column.
@@ -85,6 +99,10 @@
 
 #define FLASHBACK_PACK_RUN_MAX  62
 #define FLASHBACK_PACK_RAW      0xFE
+#define FLASHBACK_PACK_SKIP     0xFF
+
+// (Frames are compared two pixels at a time: their buffers start on words.)
+typedef u32 __attribute__((may_alias)) FlashbackWord;
 
 static inline u32 flashbackPackHash(u32 px)
 {
@@ -267,6 +285,176 @@ u32 flashbackCompress(const u16 *cols, u32 width, u32 height, u8 *dst, u32 cap)
 }
 
 // ---------------------------------------------------------------------------
+// Frames as what changed since the one before (the format: see the top of this file)
+// ---------------------------------------------------------------------------
+
+// How much of 'frame' is as it was in 'ref', the frame before it on the same
+// screen (both 'bytes' long, a multiple of 4, and starting on words):
+// FLASHBACK_SAME_ALL if they're the same throughout, and otherwise 0 to 255,
+// going by one word in every FLASHBACK_SAME_STEP bytes (255 if all of those are
+// the same). Only frames whose samples all match are compared in full, so a
+// frame that has changed costs next to nothing to tell. *sameUpTo is how many
+// of the frame's first pixels that comparison found the same (all of them for
+// FLASHBACK_SAME_ALL, 0 if it wasn't made): flashbackCompressDelta can carry on
+// from there, so a frame that has barely changed is still read only once.
+u32 flashbackSameShare(const u16 *frame, const u16 *ref, u32 bytes, u32 *sameUpTo)
+{
+    const FlashbackWord *a = (const FlashbackWord *)frame, *b = (const FlashbackWord *)ref;
+    u32 words = bytes / 4, same = 0, n = 0;
+
+    *sameUpTo = 0;
+    for (u32 i = 0; i < words; i += FLASHBACK_SAME_STEP / 4, n++)
+        same += a[i] == b[i];
+    if (same != n)
+        return same * 255 / n;
+    for (u32 i = 0; i < words; i++)
+        if (a[i] != b[i])
+        {
+            *sameUpTo = i * 2;
+            return 255;
+        }
+    *sameUpTo = bytes / 2;
+    return FLASHBACK_SAME_ALL;
+}
+
+// A SKIP of 'n' pixels (two or more ops if it's over the longest one).
+static inline u8 *flashbackPutSkip(u8 *out, u32 n)
+{
+    for (; n > 0x10000; n -= 0x10000)
+    {
+        out[0] = FLASHBACK_PACK_SKIP;
+        out[1] = out[2] = out[3] = 0xFF;
+        out += 4;
+    }
+    if (n > 255)
+    {
+        out[0] = FLASHBACK_PACK_SKIP;
+        out[1] = 0xFF;
+        out[2] = (u8)(n - 1);
+        out[3] = (u8)((n - 1) >> 8);
+        return out + 4;
+    }
+    out[0] = FLASHBACK_PACK_SKIP;
+    out[1] = (u8)(n - 1);
+    return out + 2;
+}
+
+// Compresses a frame of 'pixels' pixels as what changed since 'ref', the frame
+// before it on the same screen, into 'dst'. Both are in the screen's order, as
+// captured, and the frame is stored in that order (see the top of this file),
+// so both are read straight through. A pixel that's as it was is skipped if
+// the one after it is too, or the one before it was (a SKIP of one pixel takes
+// more than most ops do). The first 'start' pixels are known to be as they
+// were (flashbackSameShare's *sameUpTo, or 0): they're skipped unread. 'cols'
+// and 'ref' start on words. Returns the compressed size, or 0 if it wouldn't
+// be smaller than 'cap' bytes.
+u32 flashbackCompressDelta(const u16 *cols, const u16 *ref, u32 pixels, u8 *dst, u32 cap, u32 start)
+{
+    if (cap < 16)
+        return 0;
+
+    u32 index[64];
+    memset(index, 0, sizeof(index));
+    u32 prev = start != 0 ? cols[start - 1] : 0, run = 0, skip = start;
+    u8 *out = dst;
+    const u8 *limit = dst + cap - 16;   // room for a run flush, a SKIP (two long ones, at most) and the largest op
+
+    for (u32 i = start; i < pixels; i++)
+    {
+        u32 px = cols[i];
+        if (px == ref[i] && (skip != 0 || (i + 1 < pixels && cols[i + 1] == ref[i + 1])))
+        {
+            if (run != 0)
+            {
+                if (out > limit)
+                    return 0;
+                *out++ = (u8)(0xBF + run);
+                run = 0;
+            }
+            skip++;
+            // From a whole word on, two pixels at a time while they're the same.
+            if ((i & 1) != 0)
+            {
+                const FlashbackWord *a = (const FlashbackWord *)(cols + i + 1), *b = (const FlashbackWord *)(ref + i + 1);
+                u32 n = (pixels - (i + 1)) / 2, k = 0;
+                while (k < n && a[k] == b[k])
+                    k++;
+                skip += 2 * k;
+                i += 2 * k;
+            }
+            prev = cols[i];
+            continue;
+        }
+
+        if (out > limit)
+            return 0;
+        if (skip != 0)
+        {
+            out = flashbackPutSkip(out, skip);
+            skip = 0;
+        }
+        if (px == prev)
+        {
+            if (++run == FLASHBACK_PACK_RUN_MAX)
+            {
+                *out++ = 0xC0 | (FLASHBACK_PACK_RUN_MAX - 1);
+                run = 0;
+            }
+            continue;
+        }
+        if (run != 0)
+        {
+            *out++ = (u8)(0xBF + run);
+            run = 0;
+        }
+
+        // (As flashbackPackPixels, from here.)
+        u32 h = flashbackPackHash(px);
+        if (index[h] == px)
+        {
+            *out++ = (u8)h;
+            prev = px;
+            continue;
+        }
+        index[h] = px;
+
+        s32 dr = (s32)(((px >> 11) - (prev >> 11)) << 27) >> 27;
+        s32 dg = (s32)(((px >> 5) - (prev >> 5)) << 26) >> 26;
+        s32 db = (s32)((px - prev) << 27) >> 27;
+
+        if ((u32)((dr + 2) | (dg + 2) | (db + 2)) < 4)
+            *out++ = (u8)(0x40 + 0x2A + (dr << 4) + (dg << 2) + db);
+        else
+        {
+            s32 tr = dr - (dg >> 1), tb = db - (dg >> 1);
+            if ((u32)((tr + 8) | (tb + 8)) < 16)
+            {
+                out[0] = (u8)(0x80 + 32 + dg);
+                out[1] = (u8)(0x88 + (tr << 4) + tb);
+                out += 2;
+            }
+            else
+            {
+                out[0] = FLASHBACK_PACK_RAW;
+                out[1] = (u8)px;
+                out[2] = (u8)(px >> 8);
+                out += 3;
+            }
+        }
+        prev = px;
+    }
+
+    if (out > limit)
+        return 0;
+    if (skip != 0)
+        out = flashbackPutSkip(out, skip);
+    if (run != 0)
+        *out++ = (u8)(0xBF + run);
+    u32 len = (u32)(out - dst);
+    return len < cap ? len : 0;
+}
+
+// ---------------------------------------------------------------------------
 // Huffman codes over the compressed bytes (the format: see the top of this file)
 // ---------------------------------------------------------------------------
 
@@ -278,9 +466,8 @@ u32 flashbackCompress(const u16 *cols, u32 width, u32 height, u8 *dst, u32 cap)
 // FLASHBACK_HUFF_MAX_BITS shortened, and others lengthened to make room, as
 // zlib does. Every value is counted once more, so it gets a code even if the
 // last frame had none of it (this one may).
-static void flashbackHuffLengths(const u32 *counts, u8 *lengths)
+static void flashbackHuffLengths(FlashbackHuffman *h, const u32 *counts, u8 *lengths)
 {
-    FlashbackHuffman *h = g_huff;
     u32 *order = h->order, *weight = h->weight;
 
     // The values by count, fewest first (a Shell sort: 256 of them).
@@ -364,17 +551,17 @@ static void flashbackHuffCodes(const u8 *lengths, u32 *codes)
     }
 }
 
-// Packs the 'len' bytes at 'src' (a frame from flashbackCompress) into 'dst'
-// with Huffman codes from the last frame's counts, counting this frame's for
-// the next (see the top of this file). Returns the packed size, or 0 if it
-// wouldn't be smaller than 'len' (store the bytes as they are). 'dst' has room
-// for 'len' bytes. Packer thread (g_huff).
-u32 flashbackHuffman(const u8 *src, u32 len, u8 *dst)
+// Packs the 'len' bytes at 'src' (a frame from flashbackCompress or
+// flashbackCompressDelta) into 'dst' with Huffman codes from the counts of the
+// last frame packed with 'h' (each screen has its own: their frames differ),
+// counting this frame's for the next (see the top of this file). Returns the
+// packed size, or 0 if it wouldn't be smaller than 'len' (store the bytes as
+// they are). 'dst' has room for 'len' bytes. Packer thread.
+u32 flashbackHuffman(FlashbackHuffman *h, const u8 *src, u32 len, u8 *dst)
 {
     if (len <= FLASHBACK_HUFF_HEADER + 2 * FLASHBACK_HUFF_BLOCK)
         return 0;   // (too small to come out smaller)
 
-    FlashbackHuffman *h = g_huff;
     u8 lengths[256];
     dst[0] = 0xFF;
     dst[1] = 1;
@@ -382,7 +569,7 @@ u32 flashbackHuffman(const u8 *src, u32 len, u8 *dst)
     memcpy(dst + 4, &len, 4);
     for (u32 set = 0; set < 2; set++)
     {
-        flashbackHuffLengths(h->counts[set], lengths);
+        flashbackHuffLengths(h, h->counts[set], lengths);
         flashbackHuffCodes(lengths, h->codes[set]);
         for (u32 v = 0; v < 256; v += 2)
             dst[8 + set * 128 + v / 2] = (u8)(lengths[v] | lengths[v + 1] << 4);
@@ -391,14 +578,14 @@ u32 flashbackHuffman(const u8 *src, u32 len, u8 *dst)
 
     // The codes go into 'bits' (n of them so far), out 16 at a time: under 16
     // are left after each code, and a code is at most 12 more. A block's codes
-    // (FLASHBACK_HUFF_BLOCK bytes, and the up to 2 after its last op) take at
+    // (FLASHBACK_HUFF_BLOCK bytes, and the up to 3 after its last op) take at
     // most 1.5 bytes each, and the last bits 2 more: as long as each block
     // starts that far (and 1 more) before 'len', the frame comes out smaller.
     u32 *opCounts = h->counts[0], *argCounts = h->counts[1];
     const u32 *opCodes = h->codes[0], *argCodes = h->codes[1];
     const u8 *p = src, *end = src + len;
     u16 *out = (u16 *)(dst + FLASHBACK_HUFF_HEADER);
-    const u16 *last = (const u16 *)(dst + len - (FLASHBACK_HUFF_BLOCK + 2) * 3 / 2 - 2 - 1);
+    const u16 *last = (const u16 *)(dst + len - (FLASHBACK_HUFF_BLOCK + 3) * 3 / 2 - 2 - 1);
     u32 bits = 0, n = 0;
     while (p < end)
     {
@@ -418,8 +605,9 @@ u32 flashbackHuffman(const u8 *src, u32 len, u8 *dst)
                 bits >>= 16;
                 n -= 16;
             }
-            if (b - 0x80 < 0x40 || b == FLASHBACK_PACK_RAW)     // LUMA's second byte, or RAW's two
+            if (b - 0x80 < 0x40 || b >= FLASHBACK_PACK_RAW)     // LUMA's second byte, RAW's two, or SKIP's count
             {
+                bool skip = b == FLASHBACK_PACK_SKIP;
                 for (u32 k = b == FLASHBACK_PACK_RAW ? 2 : 1; k != 0; k--)
                 {
                     b = *p++;
@@ -433,6 +621,9 @@ u32 flashbackHuffman(const u8 *src, u32 len, u8 *dst)
                         bits >>= 16;
                         n -= 16;
                     }
+                    if (skip && b == 0xFF)
+                        k += 2;     // (the long SKIP: two more bytes)
+                    skip = false;
                 }
             }
         } while (p < stop);

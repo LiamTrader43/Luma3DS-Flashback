@@ -38,10 +38,11 @@
 // Capture (kernel mode, like Draw_ConvertFrameBufferLines)
 // ---------------------------------------------------------------------------
 
-// The top screen's framebuffer, as it was on screen (flashbackFlushFramebuffer).
+// A screen's framebuffer, as it was on screen (flashbackFlushFramebuffer).
 typedef struct FlashbackScreen {
+    bool top;       // the top screen's (else the bottom screen's)
     u32 pa;         // physical address
-    u32 fmtReg;     // GPU_FB_TOP_FMT
+    u32 fmtReg;     // GPU_FB_TOP_FMT or GPU_FB_BOTTOM_FMT
     u32 stride;     // bytes from one column to the next
 } FlashbackScreen;
 
@@ -182,47 +183,55 @@ static void flashbackCaptureKernel(FlashbackCaptureArgs *args)
 
 #pragma GCC pop_options
 
-static inline u32 flashbackCurrentTopFramebuffer(void)
+static inline u32 flashbackCurrentFramebuffer(bool top)
 {
-    return (GPU_FB_TOP_SEL & 1) ? GPU_FB_TOP_LEFT_ADDR_2 : GPU_FB_TOP_LEFT_ADDR_1;
+    if (top)
+        return (GPU_FB_TOP_SEL & 1) ? GPU_FB_TOP_LEFT_ADDR_2 : GPU_FB_TOP_LEFT_ADDR_1;
+    return (GPU_FB_BOTTOM_SEL & 1) ? GPU_FB_BOTTOM_ADDR_2 : GPU_FB_BOTTOM_ADDR_1;
 }
 
-// 800px mode (2D, half-width pixels) has twice the columns.
-static inline u32 flashbackScreenColumns(u32 fmtReg)
+// The top screen's 800px mode (2D, half-width pixels) has twice the columns.
+// The bottom screen always has 320.
+static inline u32 flashbackScreenColumns(bool top, u32 fmtReg)
 {
+    if (!top)
+        return 320;
     bool is3d = (fmtReg & BIT(5)) != 0;
     bool isNormal2d = (fmtReg & BIT(6)) != 0;
     return !is3d && !isNormal2d ? 800 : 400;
 }
 
 // Flushes (cleans + invalidates) the CPU cache lines of the framebuffer that's
-// on screen right now, and says which it is (false if there is none). The GPU
+// on a screen right now, and says which it is (false if there is none). The GPU
 // writes the framebuffer behind the caches' back, so lines cached by the
 // previous capture would otherwise be read back stale. Only the framebuffer:
 // flushing the entire data cache would also interrupt the game's core and
 // throw away its cached data (see docs/flashback-design.md, "Capture").
-static bool flashbackFlushFramebuffer(u32 kernPaToVa, FlashbackScreen *screen)
+static bool flashbackFlushFramebuffer(u32 kernPaToVa, bool top, FlashbackScreen *screen)
 {
     static const u8 formatSizes[8] = { 4, 3, 2, 2, 2, 0, 0, 0 };
 
-    screen->fmtReg = GPU_FB_TOP_FMT;
-    screen->pa = flashbackCurrentTopFramebuffer();
-    screen->stride = GPU_FB_TOP_STRIDE;
+    screen->top = top;
+    screen->fmtReg = top ? GPU_FB_TOP_FMT : GPU_FB_BOTTOM_FMT;
+    screen->pa = flashbackCurrentFramebuffer(top);
+    screen->stride = top ? GPU_FB_TOP_STRIDE : GPU_FB_BOTTOM_STRIDE;
     if (formatSizes[screen->fmtReg & 7] == 0 || screen->pa == 0 || screen->stride == 0)
         return false;
 
-    svcFlushDataCacheRange((void *)(screen->pa + kernPaToVa), flashbackScreenColumns(screen->fmtReg) * screen->stride);
+    svcFlushDataCacheRange((void *)(screen->pa + kernPaToVa),
+                           flashbackScreenColumns(top, screen->fmtReg) * screen->stride);
     return true;
 }
 
 // The game swapped buffers (or changed the format) since 'screen' was flushed:
 // the buffer it was may still have stale cache lines, or be getting overwritten
 // with a later frame already. (Only the format register fields used: pixel
-// format, 3D, 800px mode.)
+// format, and for the top screen, 3D and 800px mode.)
 static bool flashbackScreenChanged(const FlashbackScreen *screen)
 {
-    return flashbackCurrentTopFramebuffer() != screen->pa ||
-           ((GPU_FB_TOP_FMT ^ screen->fmtReg) & (7 | BIT(5) | BIT(6))) != 0;
+    u32 fmtReg = screen->top ? GPU_FB_TOP_FMT : GPU_FB_BOTTOM_FMT;
+    return flashbackCurrentFramebuffer(screen->top) != screen->pa ||
+           ((fmtReg ^ screen->fmtReg) & (screen->top ? 7 | BIT(5) | BIT(6) : 7)) != 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -242,7 +251,9 @@ static bool flashbackScreenChanged(const FlashbackScreen *screen)
 
 static u64 g_swapSeenAt;            // when a swap was last seen (it came since the check before)
 static bool g_swapsOnRefreshes;     // the last two seen were whole refreshes apart
-static u32 g_readTicks;             // how long a whole read takes, flush included (smoothed)
+static u32 g_readTicks;             // how long a whole read of the first screen takes, flush included (smoothed)
+static u32 g_readTicksSecond;       // ...and of the second screen after it (0 when it isn't recorded)
+static u32 g_secondGap;             // frames since the second screen was last captured
 
 static void flashbackSawSwap(u64 now)
 {
@@ -260,33 +271,44 @@ void flashbackCaptureWait(void)
     if (!g_swapsOnRefreshes || g_readTicks == 0 || need + FLASHBACK_SWAP_SETTLE >= FLASHBACK_REFRESH_TICKS)
         return;     // (nothing to go by, or no read fits between two refreshes)
 
+    // (The second screen's read too, right after, if both fit between two
+    // refreshes. If they don't, a swap that lands in the second screen's read
+    // spoils that one: the first screen's frame is the one kept clear.)
+    u64 both = need + g_readTicksSecond + g_readTicksSecond / 4;
+    if (both + FLASHBACK_SWAP_SETTLE < FLASHBACK_REFRESH_TICKS)
+        need = both;
+
     u64 untilSwap = FLASHBACK_REFRESH_TICKS - (svcGetSystemTick() - g_swapSeenAt) % FLASHBACK_REFRESH_TICKS;
     if (untilSwap < need)
         svcSleepThread((s64)((untilSwap + FLASHBACK_SWAP_SETTLE) * 1000000000ULL / SYSCLOCK_ARM11));
 }
 
-bool flashbackCapture(u16 *dst)
+// Captures a screen (the top one, or the bottom one) into 'dst', w x h pixels
+// in the screen's order. Returns false if it has no frame to capture, or, when
+// it isn't the 'first' screen (see FlashbackPriority), if the game swapped
+// buffers during the read.
+static bool flashbackCaptureScreen(bool top, bool first, u16 *dst, u32 w, u32 h)
 {
     static const u8 formatSizes[8] = { 4, 3, 2, 2, 2, 0, 0, 0 };
 
     u32 kernPaToVa = KERNPA2VA_OFFSET();
-    u32 piece = (g_w + FLASHBACK_CAPTURE_PIECES - 1) / FLASHBACK_CAPTURE_PIECES;
-    FlashbackCaptureArgs args = { .dst = dst, .outW = g_w, .outH = g_h };
+    u32 piece = (w + FLASHBACK_CAPTURE_PIECES - 1) / FLASHBACK_CAPTURE_PIECES;
+    FlashbackCaptureArgs args = { .dst = dst, .outW = w, .outH = h };
 
     for (u32 attempt = 0; attempt < FLASHBACK_CAPTURE_ATTEMPTS; attempt++)
     {
         bool lastAttempt = attempt + 1 == FLASHBACK_CAPTURE_ATTEMPTS;
         u64 start = svcGetSystemTick();
         FlashbackScreen screen;
-        if (!flashbackFlushFramebuffer(kernPaToVa, &screen))
+        if (!flashbackFlushFramebuffer(kernPaToVa, top, &screen))
             return false;   // no valid framebuffer right now
 
         args.fb = (const u8 *)(screen.pa + kernPaToVa);
         args.fmt = screen.fmtReg & 7;
         args.bpp = formatSizes[args.fmt];
         args.stride = screen.stride;
-        args.stepX = flashbackScreenColumns(screen.fmtReg) / g_w;
-        args.stepY = 240 / g_h;
+        args.stepX = flashbackScreenColumns(top, screen.fmtReg) / w;
+        args.stepY = 240 / h;
 
         // Piece by piece, stopping at the first sign of a swap: before the
         // first, the buffer flushed may not be the one on screen any more, and
@@ -296,23 +318,27 @@ bool flashbackCapture(u16 *dst)
         {
             if (!torn && flashbackScreenChanged(&screen))
             {
-                flashbackSawSwap(svcGetSystemTick());
+                if (first)  // (the wait before a capture goes by the first screen's swaps: the two swap together)
+                    flashbackSawSwap(svcGetSystemTick());
                 torn = true;
+                if (!first)
+                    return false;   // (the second screen's read isn't tried again: see flashbackCapture)
                 if (!lastAttempt)
                     break;          // try again, on the buffer just swapped in
                 if (args.col == 0)
                     return false;   // (nothing read at all: the frame counts as missed)
             }
-            if (args.col >= g_w)
+            if (args.col >= w)
                 break;
-            args.cols = g_w - args.col < piece ? g_w - args.col : piece;
+            args.cols = w - args.col < piece ? w - args.col : piece;
             svcCustomBackdoor(flashbackCaptureKernel, &args);
         }
 
         if (!torn)
         {
             u32 took = (u32)(svcGetSystemTick() - start);
-            g_readTicks = g_readTicks == 0 ? took : g_readTicks - g_readTicks / 8 + took / 8;
+            u32 *ticks = first ? &g_readTicks : &g_readTicksSecond;
+            *ticks = *ticks == 0 ? took : *ticks - *ticks / 8 + took / 8;
             return true;
         }
     }
@@ -320,5 +346,67 @@ bool flashbackCapture(u16 *dst)
     // Still torn after every attempt: the game is swapping faster than we can
     // read. The last attempt reads on to the end regardless, since a slightly
     // torn frame beats a missing one (filled with a copy of the previous one).
+    return true;
+}
+
+// Captures the first screen (the top one, or with g_priBottom the bottom one)
+// into 'first'. Returns false if it had no frame (then nothing is captured).
+//
+// If 'second' isn't NULL (both screens are recorded), the other screen is
+// captured into it after that, when it can be, and *secondOk says whether it
+// was. The first screen's frames come first: reading both takes the system
+// core twice as long, and on an Old 3DS, in a game that swaps buffers on every
+// refresh, the two reads don't fit between two swaps. So the second screen's
+// read is never tried again (a frame without one just keeps that screen as it
+// was), and it's only started if it fits before the next swap. When it
+// doesn't, FLASHBACK_BOTTOM_MAX_GAP frames in a row, the swap is waited out
+// first: the second screen then gets a frame every other one, taken a refresh
+// after the first screen's. (With no swaps to go by, or a read too long to fit
+// between two, it's tried with every frame.)
+//
+// An Old 3DS only takes it every other frame at all: each of its frames costs
+// the capture a read, and the packer at least a compare with the one before,
+// of the little time the game leaves the two.
+//
+// While the second screen's whole frame is due (g_secKeyDue: the ring's first
+// frame, and every FLASHBACK_KEY_SLOTS slots) it's taken with this frame
+// regardless, so that a clip doesn't start without it.
+bool flashbackCapture(u16 *first, u16 *second, bool *secondOk)
+{
+    g_capWaited = 0;
+    if (!flashbackCaptureScreen(!g_priBottom, true, first, g_priW, g_priH))
+        return false;
+    if (second == NULL)
+    {
+        g_readTicksSecond = 0;
+        g_secondGap = 0;
+        return true;
+    }
+
+    *secondOk = false;
+    bool due = g_secKeyDue;
+    if (!isN3DS && !due && g_secondGap + 1 < FLASHBACK_BOTTOM_MAX_GAP)
+    {
+        g_secondGap++;      // (not with this frame)
+        return true;
+    }
+    u64 need = g_readTicksSecond + g_readTicksSecond / 4 + FLASHBACK_SWAP_MARGIN;
+    if (g_swapsOnRefreshes && g_readTicksSecond != 0 && need + FLASHBACK_SWAP_SETTLE < FLASHBACK_REFRESH_TICKS)
+    {
+        u64 untilSwap = FLASHBACK_REFRESH_TICKS - (svcGetSystemTick() - g_swapSeenAt) % FLASHBACK_REFRESH_TICKS;
+        if (untilSwap < need)
+        {
+            if (!due && g_secondGap + 1 < FLASHBACK_BOTTOM_MAX_GAP)
+            {
+                g_secondGap++;      // (not with this frame)
+                return true;
+            }
+            u64 t0 = svcGetSystemTick();
+            svcSleepThread((s64)((untilSwap + FLASHBACK_SWAP_SETTLE) * 1000000000ULL / SYSCLOCK_ARM11));
+            g_capWaited = svcGetSystemTick() - t0;
+        }
+    }
+    *secondOk = flashbackCaptureScreen(g_priBottom, false, second, g_secW, g_secH);
+    g_secondGap = *secondOk ? 0 : g_secondGap + 1;
     return true;
 }

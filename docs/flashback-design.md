@@ -31,6 +31,11 @@ stage makes the work wait in memory instead of holding up the stages before it.
 A grid slot that gets no frame becomes a copy of the frame before it, so clips
 always play at the right speed.
 
+Packing first compares each screen's frame with the one before. A frame that's
+the same isn't stored, one that's much the same is stored as what changed, and
+the bottom screen's frame, if it's recorded, goes in the same ring slot as the
+top screen's (see "Frames that haven't changed, or only partly").
+
 ## Threads and priorities
 
 *Code: `flashbackCreateThread`.*
@@ -233,6 +238,170 @@ swapping on refreshes went from 1.24 reads per frame to 1.00 for a 30 fps game
 of Time 3D then read each frame 1.00-1.04 times, and the same 10-minute clip
 dropped 568 frames instead of 1394, none in its first 3¾ minutes. The rest were
 the SD card's (see "Long recordings").
+
+## Frames that haven't changed, or only partly
+
+*Code: `flashbackPackFrame` (`flashback_record.c`), `flashbackSameShare` and
+`flashbackCompressDelta` (`flashback_compress.c`), `flashbackPlanClip`
+(`flashback_clip.c`).*
+
+Both models end up limited by the SD card, so what's left to gain is in writing
+less. Real clips were measured for how much of that there is (36 of them, read
+with Flashback Studio's reader, each frame compared with the one before):
+
+| Game | Frames the same as the one before | Bytes saved by storing only what changed |
+| ---- | --------------------------------- | ---------------------------------------- |
+| Mario Kart 7 | 0-2% | 2-5% |
+| Super Smash Bros. | 0-5% (20% in a clip with a pause) | 3-11% |
+| Super Mario 3D Land, Donkey Kong Country Returns 3D | 1-6% | 22-36% |
+| New Super Mario Bros. 2 | 2-8% | 42-66% |
+| Ocarina of Time 3D | 2-24% | 5% moving, 50-90% with the camera still |
+
+So three things happen to a frame, by how much of it is as it was in the frame
+before on the same screen:
+
+- **All of it: nothing is stored.** If that goes for both screens, the ring's
+  newest slot is shown for one more grid slot, and nothing is compressed or
+  written. These aren't dropped frames: missed captures are counted apart
+  (`g_missed`), and a clip's index says how many of a slot's copies they were.
+- **Half or more (`FLASHBACK_DELTA_MIN_SAME`): what changed is stored.**
+  The same ops as a whole frame, plus one that skips pixels that stay.
+- **Less: the whole frame**, as before, by the assembly packer. Mario Kart 7
+  and Smash Bros. are mostly here, where storing what changed saves little and
+  the C that does it is slower on an Old 3DS than the assembly.
+
+Half, because that's about where storing what changed stops costing an Old 3DS
+more time than storing the frame whole. The recorder's own code was timed on a
+PC over real clips' frames (the assembly is ~1.45 times as fast as the C it
+replaces): a frame as what changed takes under 0.7 of the C's time for a whole
+frame once half of it stays. A quarter was tried first. On Smash Bros. clips it
+chose that for 78% of the frames, which came out 14% bigger (what stays there
+is flat, and a flat area takes next to nothing either way) and took longer.
+At a half, every clip measured was the same size or smaller than with whole
+frames, and within a few percent of the best choice made with hindsight.
+
+**Telling which** (`flashbackSameShare`) compares one word in every 1024 bytes
+first: under 200 words a frame. Only if every one matches are the frames
+compared in full, and then storing what changed carries on from where that
+comparison stopped. So no frame is read twice.
+
+**In the screen's own order.** A frame stored as what changed is packed column
+by column, the way the screen holds it, not upright row by row as whole frames
+are. Both frames are then read straight through memory. Row by row, a row
+touches a cache line per column in each frame: 800 lines, 25 KB, for a 16 KB
+cache on an Old 3DS, which would fetch them again for every row.
+
+**Which screen comes first** (`FlashbackPriority`). With both screens recorded,
+one is the first screen and the other the second: the top one first, unless
+the bottom one is given priority in the menu (for games played on it). The
+first screen is recorded as it is alone: captured with every frame, its frames
+always stored. The second gets the time and the room that are left, as the
+paragraphs below describe. So when an Old 3DS or a slow card can't keep up
+with both, the second screen goes without, and the first is no worse off than
+alone, but for what the second does cost: its captures, its compares, and a
+whole frame about once a second.
+
+**The frame before** is, for the first screen, the one in the capture buffer
+before the one being packed, which the capture thread never captures into: with
+4 buffers, 3 frames can wait. For the second screen it's the last of its frames
+that was stored (not every one is: see below), in whichever of its 4 buffers
+that is. The capture thread leaves that one alone too: it captures into one
+that holds neither it nor a frame waiting. A save builds the clip's index over
+the buffers, so the frames after a save are stored whole
+(`flashbackForgetFrames`).
+
+**Where a clip can start.** A frame stored as what changed needs the frames
+before it, back to a whole one. So every 30 ring slots (`FLASHBACK_KEY_SLOTS`)
+both screens are stored whole: the first screen's frame in every 30th slot, the
+second screen's with its next frame from then on (it isn't captured with every
+frame). A clip's index starts with the slots from the last whole frame of each
+screen before its first frame, whichever is further back, 38 slots at most
+(`FLASHBACK_LEAD_MAX`): read, not shown (0 copies). Slots, not time: a still
+picture uses no slots, so it brings no whole frames either.
+
+**Both screens' frames go in one slot**: the top screen's, then the bottom
+screen's, whichever comes first. A slot has room for the top screen's frame as
+it is (192 KB, the bigger of the two), frames mostly compress to under half,
+and the second screen often stays as it is, so there's usually room. That way
+the ring is hardly bigger (with a slot for each screen, a 10-minute buffer
+would pass the 4 GB a file can be), and the card still gets one write per
+frame. With the bottom screen first, its frame is compressed apart, in a
+second slot's worth of staging, and moved up behind the top screen's once that
+one's size is known: a clip's layout is the same either way, and Flashback
+Studio needs to know nothing of which screen came first.
+
+**When there isn't room or time**, the first screen's frames come first:
+- The second screen's frame isn't stored: a clip shows the one before it for
+  longer. The next one is compared with the last one that was stored, kept in
+  its buffer for that, so it can still go in as what changed.
+- It isn't compressed at all where it's unlikely to fit: not whole in less room
+  than its last whole frame took and an eighth, and not again, either way, in
+  no more room than the last try didn't fit in (`g_secWholeNeed`,
+  `g_secDeltaNeed`).
+- Nor while packing is falling behind (`flashbackFallingBehind`): the next
+  frame is already captured and waiting (the processor is behind), or staging
+  is over half full (the card is). Half of all of it: a New 3DS's, up to
+  ~25 MB, lets frames wait out a slow card for seconds first, and an Old 3DS's,
+  ~3 MB, for under one. That came after the measurements below, which showed
+  where the remaining drops were.
+- Its whole frame, when one is due, is always stored. If it fits beside the
+  first screen's frame, the two share the slot. If not, it has a slot of its
+  own: the one before the first screen's frame's (`FLASHBACK_FRAME_UNSHOWN`; an
+  index entry with 0 copies, which a reader only reads). So however little
+  room the first screen leaves, the second has a new picture every 30 slots at
+  least, and no clip starts without one. The ring has one more slot in every
+  30 for these (`flashbackRingSlots`): 3.5% more, with both screens recorded.
+
+**Measured on an Old 3DS**: Mario Kart 7, a Rainbow Road time trial, full
+resolution, 30 fps, both screens, the top one first, read back from the saved
+clips' indexes. The bottom screen there is a second 3D scene (a planet, the
+rainbow road, stars): 61% of its pixels change from one of its stored frames
+to the next, so they're nearly all whole, ~71 KB each (46%).
+
+| | First build | Giving way to room only | This one |
+| --- | --- | --- | --- |
+| Frames dropped, of 1800 | 361 | 29 | 0 |
+| The bottom screen's frames stored | 21.7 a second (1.53 MB/s) | 13.2 a second (0.89 MB/s) | 12.2 a second (0.75 MB/s) |
+| Written | 3.80 MB/s | 3.56 MB/s | 3.47 MB/s |
+| Compress, write (the Flashback screen, at the end) | 37 ms, 42 ms | 30 ms, 34 ms | 25 ms, 34 ms |
+
+The first build captured the bottom screen with nearly every frame and stored
+whatever fitted: a busy bottom screen at up to 30 fps is more than an Old 3DS's
+processor and card have to spare. With the top screen alone, it dropped none.
+Here, capturing the bottom screen every other frame did the most. The 29 left
+came in short bursts (1 to 4 a second), all in the clip's second half, and not
+in its busiest seconds: earlier, the card took 4.3 MB a second without a drop.
+By the end, writes averaged 34 ms against the 33 a frame has: the card had
+slowed (see "Long recordings"). The second screen didn't give way to that, only
+to a lack of room: so now it gives way when packing falls behind too (above).
+With that, the same run dropped none. The bottom screen gave way mostly on the
+moon (41 to 55 s into the clip), where both screens are covered in craters:
+twice for a few seconds it was down to its picture a second, while that picture
+was changing all the time; its longest gap was 31 frames. In the clip's first
+35 seconds it kept nearly all of its 15 a second.
+
+**Capturing the second screen** (`flashbackCapture`) comes after the first
+screen's frames. Reading it right after the first screen, and again whenever
+the game swaps buffers during the read (as the first screen's is), can take a
+whole frame's time: a game like Mario Kart 7 swaps on every refresh, and on an
+Old 3DS the two reads, on a system core the recorder gets a third of, don't fit
+between two swaps. So:
+- its read is never tried again: a frame without one keeps that screen as it
+  was, which costs nothing;
+- it's only started if it fits before the next swap, and when it doesn't, it
+  waits a swap out every other frame instead. The second screen then has half
+  the frame rate, taken a refresh after the first screen's frame;
+- an Old 3DS only takes it every other frame at all. Each of its frames costs
+  the capture a read and the packer at least a compare, out of the little time
+  the game leaves them;
+- while its whole frame is due, it's taken with the next frame regardless, so
+  that a ring's first frame has it.
+
+**No audio setting.** Audio is always recorded: the menu's line and button for
+turning it off went to the priority setting. Without audio a clip was 1.6 MB
+smaller for every 10 seconds, and the card had three fewer writes a second.
+
+Not measured yet on a 3DS: the bottom screen first, and a New 3DS.
 
 ## The Rosalina menu's pause
 
