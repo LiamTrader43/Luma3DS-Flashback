@@ -22,7 +22,7 @@ https://github.com/user-attachments/assets/76ac9ae6-6eb3-4fe5-a946-18c9b925d975
 
 1. Download `boot.firm` from the [latest release](https://github.com/LiamTrader43/Luma3DS-Flashback/releases/latest).
 2. Rename it to `y_flashback.firm` and copy it to `/luma/payloads/` on your SD card.
-3. Get [Flashback Studio](https://github.com/LiamTrader43/Flashback-Studio/releases/latest) for your 3DS, your PC, or both. Clips from Flashback v3.0 and newer need Flashback Studio v3.1 or newer.
+3. Get [Flashback Studio](https://github.com/LiamTrader43/Flashback-Studio/releases/latest) for your 3DS, your PC, or both. Clips from Flashback v4.0 and newer need Flashback Studio v4.0 or newer.
 4. **Hold <kbd>Y</kbd> while turning on your 3DS** to start Flashback. Turn it on normally and your usual Luma3DS starts instead.
 
 ### Then, to save a clip:
